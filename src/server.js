@@ -251,7 +251,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           ranked = preliminary;
         }
         logger.info("subtitle listing analysis ready", { requestId, elapsedMs: Date.now() - started });
-        const usable = ranked.filter((candidate) => candidate.confidence >= 15 && !candidate.downloadFailed);
+        const usable = ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed);
         const eligible = [
           ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
           ...usable.filter((candidate) => candidate.confidence < config.minConfidence)

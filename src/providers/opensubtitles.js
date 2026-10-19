@@ -153,10 +153,10 @@ export class OpenSubtitlesProvider {
         if (!Number.isFinite(totalPages) || page >= totalPages) break;
       }
     }
-    // Some newly-added titles have incomplete or mismatched catalogue IDs.
-    // Only after the precise IMDb search returns nothing, let OpenSubtitles
-    // parse the release filename while keeping type/season/episode constraints.
-    if (all.length === 0 && query) {
+    // New episodes are often searchable by their release filename before the
+    // provider has attached them to the parent IMDb entry. Always merge one
+    // filename search instead of using it only when the IMDb search is empty.
+    if (query) {
       const fallback = {
         languages: "ar",
         order_by: "download_count",

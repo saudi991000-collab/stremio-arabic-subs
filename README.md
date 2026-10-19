@@ -1,4 +1,4 @@
-# ترجمة النخبة 3.0.0
+# ترجمة النخبة 3.1.0
 
 A dependency-free, self-hosted Stremio addon that returns up to 25 ranked human Arabic subtitles. It groups every result under `ara` and puts rank, trust, real format and provider in `label`, so compatible Stremio clients show one Arabic language with multiple variants. It supports SRT, VTT, ASS and SSA and does not generate AI translations. See [README-AR.md](README-AR.md) for complete Arabic setup instructions.
 

@@ -46,7 +46,7 @@ export class SubDLProvider {
   }
 
   async search(context) {
-    const params = new URLSearchParams({
+    const common = {
       api_key: this.config.apiKey,
       type: context.media.type === "series" ? "tv" : "movie",
       languages: "AR",
@@ -55,32 +55,39 @@ export class SubDLProvider {
       hi: "1",
       unpack: "1",
       client: "stremio"
-    });
-    if (context.media.imdbId) params.set("imdb_id", `tt${context.media.imdbId}`);
-    else if (context.extra.filename) params.set("file_name", context.extra.filename);
-    else return [];
+    };
+    const searches = [];
+    if (context.media.imdbId) searches.push(new URLSearchParams({ ...common, imdb_id: `tt${context.media.imdbId}` }));
+    if (context.extra.filename) searches.push(new URLSearchParams({ ...common, file_name: context.extra.filename }));
+    if (!searches.length) return [];
     if (context.media.type === "series") {
-      params.set("season_number", String(context.media.season));
-      params.set("episode_number", String(context.media.episode));
-    }
-    if (context.extra.filename) params.set("file_name", context.extra.filename);
-    const response = await fetch(`${this.config.baseUrl}/subtitles?${params}`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(12000)
-    });
-    if (response.status === 429) throw new Error("SubDL request quota has been reached");
-    if (!response.ok) throw new Error(`SubDL search failed with HTTP ${response.status}`);
-    const payload = await response.json();
-    if (payload.status === false) throw new Error(`SubDL search failed: ${payload.error || "unknown error"}`);
-    const candidates = [];
-    for (const subtitle of payload.subtitles || []) {
-      const files = subtitle.unpack_files?.length ? subtitle.unpack_files : [subtitle];
-      for (const file of files) {
-        const candidate = mapSubtitle(subtitle, file, Boolean(context.media.imdbId));
-        if (candidate) candidates.push(candidate);
+      for (const params of searches) {
+        params.set("season_number", String(context.media.season));
+        params.set("episode_number", String(context.media.episode));
       }
     }
-    return candidates;
+    const candidates = [];
+    const payloads = await Promise.all(searches.map(async (params) => {
+      const response = await fetch(`${this.config.baseUrl}/subtitles?${params}`, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(12000)
+      });
+      if (response.status === 429) throw new Error("SubDL request quota has been reached");
+      if (!response.ok) throw new Error(`SubDL search failed with HTTP ${response.status}`);
+      const payload = await response.json();
+      if (payload.status === false) throw new Error(`SubDL search failed: ${payload.error || "unknown error"}`);
+      return payload;
+    }));
+    for (const payload of payloads) {
+      for (const subtitle of payload.subtitles || []) {
+        const files = subtitle.unpack_files?.length ? subtitle.unpack_files : [subtitle];
+        for (const file of files) {
+          const candidate = mapSubtitle(subtitle, file, Boolean(context.media.imdbId));
+          if (candidate) candidates.push(candidate);
+        }
+      }
+    }
+    return [...new Map(candidates.map((candidate) => [String(candidate.downloadRef), candidate])).values()];
   }
 
   async download(ref) {

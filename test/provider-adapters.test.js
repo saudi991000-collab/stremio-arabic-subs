@@ -65,10 +65,11 @@ test("uses imdb_id rather than parent_imdb_id for movies", async () => {
   }, async () => {
     const provider = new OpenSubtitlesProvider({ apiKey: "test", baseUrl: "https://api.opensubtitles.com/api/v1", userAgent: "test" });
     await provider.search({ media: { type: "movie", imdbId: "15239678" }, extra: { filename: "Dune.Part.Two.2024.mkv" } }, 1);
-    assert.equal(urls.length, 1);
+    assert.equal(urls.length, 2);
     assert.match(urls[0], /imdb_id=15239678/);
     assert.doesNotMatch(urls[0], /parent_imdb_id=/);
     assert.match(urls[0], /type=movie/);
+    assert.match(urls[1], /[?&]query=dune.part.two.2024/);
   });
 });
 
