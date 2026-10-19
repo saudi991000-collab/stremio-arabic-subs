@@ -1,0 +1,16 @@
+{
+  "name": "arabic-elite-subs",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Arabic Elite Subtitles addon for Stremio with ranked multi-source SRT, VTT, ASS and SSA results.",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "test": "node --test",
+    "check": "node --check src/server.js",
+    "benchmark": "node --env-file-if-exists=.env scripts/benchmark.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
