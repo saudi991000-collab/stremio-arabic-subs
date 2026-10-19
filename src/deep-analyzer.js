@@ -170,7 +170,10 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
   const reference = options.reference || await within(loadReference(context, provider, cache), referenceBudget).catch(() => null);
   const results = new Array(selected.length);
   let cursor = 0;
-  const workers = Array.from({ length: Math.min(5, selected.length) }, async () => {
+  // Render's free instance has enough network concurrency but limited wall
+  // time per Stremio listing. Validate more independent provider downloads in
+  // parallel so a 25-result request does not stop halfway through.
+  const workers = Array.from({ length: Math.min(10, selected.length) }, async () => {
     while (cursor < selected.length) {
       if (Date.now() >= deadline) return;
       const index = cursor;
