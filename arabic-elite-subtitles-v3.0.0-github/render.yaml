@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: arabic-elite-subtitles
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: HOST
+        value: 0.0.0.0
+      - key: URL_TOKEN_SECRET
+        generateValue: true
+      - key: OPENSUBTITLES_API_KEY
+        sync: false
+      - key: OPENSUBTITLES_USERNAME
+        sync: false
+      - key: OPENSUBTITLES_PASSWORD
+        sync: false
+      - key: SUBDL_API_KEY
+        sync: false
+      - key: SUBSOURCE_API_KEY
+        sync: false
+      - key: ARABICSUBS_API_KEY
+        sync: false
+      - key: RESULT_MODE
+        value: top20
+      - key: MAX_RESULTS
+        value: "25"
+      - key: MIN_CONFIDENCE
+        value: "70"
+      - key: DOWNLOAD_FALLBACKS
+        value: "6"
