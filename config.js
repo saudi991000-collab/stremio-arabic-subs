@@ -24,9 +24,9 @@ export function readConfig(env = process.env) {
     maxResults: int(env.MAX_RESULTS, 25, 1, 25),
     downloadFallbacks: int(env.DOWNLOAD_FALLBACKS, 4, 1, 6),
     maxSearchPages: int(env.MAX_SEARCH_PAGES, 2, 1, 10),
-    deepAnalysisCandidates: int(env.DEEP_ANALYSIS_CANDIDATES, 2, 0, 20),
-    deepAnalysisTimeoutMs: int(env.DEEP_ANALYSIS_TIMEOUT_MS, 4500, 1000, 30000),
-    listingDeadlineMs: int(env.LISTING_DEADLINE_MS, 8500, 3000, 12000),
+    deepAnalysisCandidates: int(env.DEEP_ANALYSIS_CANDIDATES, 12, 0, 25),
+    deepAnalysisTimeoutMs: int(env.DEEP_ANALYSIS_TIMEOUT_MS, 6500, 1000, 30000),
+    listingDeadlineMs: int(env.LISTING_DEADLINE_MS, 11000, 3000, 12000),
     providerSearchTimeoutMs: int(env.PROVIDER_SEARCH_TIMEOUT_MS, 4000, 1000, 10000),
     onDemandSyncTimeoutMs: int(env.ON_DEMAND_SYNC_TIMEOUT_MS, 7000, 1000, 10000),
     companionWaitMs: int(env.COMPANION_WAIT_MS, 1200, 0, 5000),
@@ -43,12 +43,13 @@ export function readConfig(env = process.env) {
     allowMachineTranslated: bool(env.ALLOW_MACHINE_TRANSLATED, false),
     allowBilingual: bool(env.ALLOW_BILINGUAL, true),
     preferHearingImpaired: bool(env.PREFER_HEARING_IMPAIRED, false),
+    validateBeforeListing: bool(env.VALIDATE_BEFORE_LISTING, true),
     openSubtitles: {
       apiKey: env.OPENSUBTITLES_API_KEY || "",
       username: env.OPENSUBTITLES_USERNAME || "",
       password: env.OPENSUBTITLES_PASSWORD || "",
       baseUrl: "https://api.opensubtitles.com/api/v1",
-      userAgent: "ArabicEliteSubs v3.1.1"
+      userAgent: "ArabicEliteSubs v3.2.0"
     },
     subdl: {
       apiKey: env.SUBDL_API_KEY || "",

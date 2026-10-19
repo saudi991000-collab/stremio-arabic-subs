@@ -18,7 +18,7 @@ import { SubSourceProvider } from "./providers/subsource.js";
 import { ArabicSubsProvider } from "./providers/arabicsubs.js";
 import { StremioV3Provider } from "./providers/stremio-v3.js";
 import { MultiProvider } from "./providers/multi.js";
-import { deepAnalyzeCandidates } from "./deep-analyzer.js";
+import { deepAnalyzeCandidates, normalizedSubtitleCacheKey } from "./deep-analyzer.js";
 import { retimeSubtitle } from "./timing.js";
 import {
   CompanionRegistry,
@@ -249,17 +249,28 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           ranked = await deepAnalyzeCandidates(preliminary, context, actualProvider, actualCache, {
             limit: config.deepAnalysisCandidates,
             timeoutMs: analysisBudget,
-            reference: localReference
+            reference: localReference,
+            maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
           });
         } else {
           ranked = preliminary;
         }
         logger.info("subtitle listing analysis ready", { requestId, elapsedMs: Date.now() - started });
-        const usable = ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed);
-        const eligible = [
-          ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
-          ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
-        ];
+        const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
+        const usable = ranked.filter((candidate) =>
+          candidate.confidence >= 5 &&
+          !candidate.downloadFailed &&
+          (!requireVerifiedDownload || candidate.deepAnalyzed === true)
+        );
+        const eligible = requireVerifiedDownload
+          ? usable.filter((candidate) =>
+            candidate.confidence >= config.minConfidence &&
+            !candidate.reasons?.includes("timing-mismatch")
+          )
+          : [
+            ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
+            ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
+          ];
         const selected = config.resultMode === "best" ? eligible.slice(0, 1) : eligible.slice(0, config.maxResults);
         const subtitles = selected.map((candidate, index) => {
           const extension = extensionOf(candidate);
@@ -316,7 +327,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const tokenItems = payload.items || (payload.fileIds || []).map((ref) => ({ provider: "opensubtitles", ref }));
         for (const item of tokenItems) {
           try {
-            const key = `subtitle:v10:original:${item.provider}:${item.ref}:${item.season || ""}:${item.episode || ""}`;
+            const key = normalizedSubtitleCacheKey({
+              provider: item.provider,
+              ref: item.ref,
+              season: item.season,
+              episode: item.episode
+            });
             let normalizedBuffer = await actualCache.getFile(key);
             let extension = item.extension || payload.extension;
             if (!normalizedBuffer) {
