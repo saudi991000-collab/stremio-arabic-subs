@@ -25,6 +25,8 @@ services:
         sync: false
       - key: ARABICSUBS_API_KEY
         sync: false
+      - key: WYZIE_API_KEY
+        sync: false
       - key: RESULT_MODE
         value: top20
       - key: MAX_RESULTS
