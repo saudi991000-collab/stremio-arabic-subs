@@ -36,4 +36,8 @@ services:
       - key: VALIDATE_BEFORE_LISTING
         value: "true"
       - key: DEEP_ANALYSIS_CANDIDATES
-        value: "12"
+        value: "25"
+      - key: MAX_SEARCH_PAGES
+        value: "4"
+      - key: COMPANION_WAIT_MS
+        value: "0"
