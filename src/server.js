@@ -18,7 +18,7 @@ import { SubSourceProvider } from "./providers/subsource.js";
 import { ArabicSubsProvider } from "./providers/arabicsubs.js";
 import { StremioV3Provider } from "./providers/stremio-v3.js";
 import { MultiProvider } from "./providers/multi.js";
-import { deepAnalyzeCandidates } from "./deep-analyzer.js";
+import { deepAnalyzeCandidates, normalizedSubtitleCacheKey } from "./deep-analyzer.js";
 import { retimeSubtitle } from "./timing.js";
 import {
   CompanionRegistry,
@@ -29,6 +29,10 @@ import {
 } from "./companion.js";
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const embeddedConfigurePage = `<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ترجمة النخبة</title><style>body{margin:0;background:#0d0b18;color:#fff;font-family:system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:620px;margin:24px;padding:34px;border:1px solid #7c5cff;border-radius:22px;background:#171328;text-align:center}h1{margin-top:0}p{color:#cbc5df;line-height:1.8}.button{display:inline-block;margin:10px;padding:14px 24px;border-radius:14px;background:#7c5cff;color:white;text-decoration:none;font-weight:700}.url{direction:ltr;word-break:break-all;background:#0b0912;padding:12px;border-radius:10px}</style></head>
+<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 25 ترجمة عربية بشرية مرتبة، مع دعم SRT وVTT وASS وSSA.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div></main></body></html>`;
 
 function json(response, status, data, extraHeaders = {}) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", ...extraHeaders });
@@ -194,7 +198,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       }
       if (url.pathname === "/manifest.json") return json(response, 200, manifest);
       if (url.pathname === "/" || url.pathname === "/configure") {
-        const template = await readFile(path.join(moduleDirectory, "../public/configure.html"), "utf8");
+        const template = await readFile(path.join(moduleDirectory, "../public/configure.html"), "utf8").catch(() => embeddedConfigurePage);
         const manifestUrl = `${baseUrl(request, config)}/manifest.json`;
         return html(response, 200, template.replaceAll("{{MANIFEST_URL}}", manifestUrl).replaceAll("{{STREMIO_URL}}", manifestUrl.replace(/^https?:/, "stremio:")));
       }
@@ -245,17 +249,28 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           ranked = await deepAnalyzeCandidates(preliminary, context, actualProvider, actualCache, {
             limit: config.deepAnalysisCandidates,
             timeoutMs: analysisBudget,
-            reference: localReference
+            reference: localReference,
+            maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
           });
         } else {
           ranked = preliminary;
         }
         logger.info("subtitle listing analysis ready", { requestId, elapsedMs: Date.now() - started });
-        const usable = ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed);
-        const eligible = [
-          ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
-          ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
-        ];
+        const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
+        const usable = ranked.filter((candidate) =>
+          candidate.confidence >= 5 &&
+          !candidate.downloadFailed &&
+          (!requireVerifiedDownload || candidate.deepAnalyzed === true)
+        );
+        const eligible = requireVerifiedDownload
+          ? usable.filter((candidate) =>
+            candidate.confidence >= config.minConfidence &&
+            !candidate.reasons?.includes("timing-mismatch")
+          )
+          : [
+            ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
+            ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
+          ];
         const selected = config.resultMode === "best" ? eligible.slice(0, 1) : eligible.slice(0, config.maxResults);
         const subtitles = selected.map((candidate, index) => {
           const extension = extensionOf(candidate);
@@ -312,7 +327,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const tokenItems = payload.items || (payload.fileIds || []).map((ref) => ({ provider: "opensubtitles", ref }));
         for (const item of tokenItems) {
           try {
-            const key = `subtitle:v10:original:${item.provider}:${item.ref}:${item.season || ""}:${item.episode || ""}`;
+            const key = normalizedSubtitleCacheKey({
+              provider: item.provider,
+              ref: item.ref,
+              season: item.season,
+              episode: item.episode
+            });
             let normalizedBuffer = await actualCache.getFile(key);
             let extension = item.extension || payload.extension;
             if (!normalizedBuffer) {
@@ -415,6 +435,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (config.tokenSecretGenerated) logger.warn("URL_TOKEN_SECRET is not set; signed subtitle URLs will change after restart");
   const server = await createAddonServer({ config });
   server.listen(config.port, config.host, () => {
-    logger.info("Arabic SyncRank started", { host: config.host, port: config.port, configure: `${config.publicBaseUrl || `http://127.0.0.1:${config.port}`}/configure` });
+    logger.info("Arabic Elite Subtitles started", { host: config.host, port: config.port, configure: `${config.publicBaseUrl || `http://127.0.0.1:${config.port}`}/configure` });
   });
 }

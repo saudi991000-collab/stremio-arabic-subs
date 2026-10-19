@@ -1,8 +1,17 @@
 import { normalizeSubtitle } from "./subtitle.js";
 import { compareSpeechActivity, compareTimelines, inspectStyling, parseTimeline } from "./timing.js";
 
+export function normalizedSubtitleCacheKey({ provider, ref, season, episode }) {
+  return `subtitle:v11:verified:${provider}:${ref}:${season || ""}:${episode || ""}`;
+}
+
 function subtitleCacheKey(candidate, context) {
-  return `subtitle:v9:${candidate.provider}:${candidate.downloadRef ?? candidate.fileId}:${context.media.season || ""}:${context.media.episode || ""}`;
+  return normalizedSubtitleCacheKey({
+    provider: candidate.provider,
+    ref: candidate.downloadRef ?? candidate.fileId,
+    season: context.media.season,
+    episode: context.media.episode
+  });
 }
 
 async function loadNormalized(candidate, context, provider, cache, requireArabic = true) {
@@ -169,6 +178,13 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
       const candidate = selected[index];
       try {
         const inspected = await within(loadNormalized(candidate, context, provider, cache, true), deadline - Date.now());
+        if (
+          context.media.type === "series" &&
+          Number(options.maxSeriesSubtitleSeconds) > 0 &&
+          inspected.analysis.durationSeconds > Number(options.maxSeriesSubtitleSeconds)
+        ) {
+          throw new Error("series-subtitle-duration-mismatch");
+        }
         results[index] = applyEvidence(candidate, inspected, reference);
       } catch {
         results[index] = {
