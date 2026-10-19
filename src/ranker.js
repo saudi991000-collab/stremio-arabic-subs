@@ -120,7 +120,12 @@ export function scoreCandidate(candidate, context, preferences = {}) {
 
   const metadataEpisodeMatch = context.media.type === "series" && Number(details.episodeNumber) === context.media.episode;
   const filenameEpisodeMatch = context.media.type === "series" && actual.episode === context.media.episode;
-  const episodeEvidence = metadataEpisodeMatch || filenameEpisodeMatch || releaseKind === "episode";
+  // Some providers scope their API request to the exact season and episode but
+  // return generic filenames (for example, "Arabic.srt"). Treat the scoped API
+  // result as episode evidence instead of requiring the episode number to be
+  // repeated in the subtitle filename.
+  const scopedEpisodeMatch = context.media.type === "series" && candidate.episodeScoped === true;
+  const episodeEvidence = metadataEpisodeMatch || filenameEpisodeMatch || releaseKind === "episode" || scopedEpisodeMatch;
   let confidence = context.media.type === "series" ? 25 : 45;
   if (metadataEpisodeMatch && filenameEpisodeMatch) {
     confidence += 35;
@@ -131,6 +136,9 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   } else if (filenameEpisodeMatch || releaseKind === "episode") {
     confidence += 30;
     if (filenameEpisodeMatch && releaseKind !== "episode") reasons.push("episode-filename");
+  } else if (scopedEpisodeMatch) {
+    confidence += 35;
+    reasons.push("episode-catalog");
   }
   if (actual.season === context.media.season) confidence += 5;
   if (titleMatch) confidence += 18;

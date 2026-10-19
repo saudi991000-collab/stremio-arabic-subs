@@ -90,6 +90,8 @@ export class OpenSubtitlesProvider {
     this.id = "opensubtitles";
     this.config = config;
     this.token = "";
+    this.loginAttempted = false;
+    this.loginPromise = null;
   }
 
   headers(extra = {}) {
@@ -119,6 +121,20 @@ export class OpenSubtitlesProvider {
     this.token = payload.token || "";
   }
 
+  async ensureLogin() {
+    if (this.token) return;
+    if (this.loginPromise) {
+      await this.loginPromise;
+      return;
+    }
+    if (this.loginAttempted || !this.config.username || !this.config.password) return;
+    this.loginAttempted = true;
+    this.loginPromise = this.login().catch(() => null).finally(() => {
+      this.loginPromise = null;
+    });
+    await this.loginPromise;
+  }
+
   async searchPage(params, page) {
     const query = new URLSearchParams({ ...params, page: String(page) });
     const response = await this.request(`${this.config.baseUrl}/subtitles?${query}`);
@@ -144,7 +160,11 @@ export class OpenSubtitlesProvider {
     for (const params of searches) {
       for (let page = 1; page <= maxPages; page += 1) {
         const payload = await this.searchPage(params, page);
-        all.push(...mapResults(payload).map((item) => ({ ...item, catalogMatch: Boolean(context.media.imdbId) })));
+        all.push(...mapResults(payload).map((item) => ({
+          ...item,
+          catalogMatch: Boolean(context.media.imdbId),
+          episodeScoped: context.media.type === "series"
+        })));
         const totalPages = Number(
           payload?.total_pages ??
           payload?.pagination?.total_pages ??
@@ -168,7 +188,7 @@ export class OpenSubtitlesProvider {
         fallback.episode_number = String(context.media.episode);
       }
       const payload = await this.searchPage(fallback, 1);
-      all.push(...mapResults(payload).map((item) => ({ ...item, catalogMatch: false })));
+      all.push(...mapResults(payload).map((item) => ({ ...item, catalogMatch: false, episodeScoped: false })));
     }
     const unique = new Map(all.map((item) => [item.fileId, item]));
     return [...unique.values()];
@@ -201,6 +221,10 @@ export class OpenSubtitlesProvider {
   }
 
   async getDownloadLink(fileId) {
+    // Authenticate before the first download whenever account credentials are
+    // configured. Waiting for a 401 kept paid/VIP accounts on the anonymous
+    // quota because quota exhaustion is normally reported as 429 instead.
+    await this.ensureLogin();
     const perform = () => this.request(`${this.config.baseUrl}/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

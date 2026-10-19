@@ -49,7 +49,7 @@ export function readConfig(env = process.env) {
       username: env.OPENSUBTITLES_USERNAME || "",
       password: env.OPENSUBTITLES_PASSWORD || "",
       baseUrl: "https://api.opensubtitles.com/api/v1",
-      userAgent: "ArabicEliteSubs v3.2.1"
+      userAgent: "ArabicEliteSubs v3.2.2"
     },
     subdl: {
       apiKey: env.SUBDL_API_KEY || "",

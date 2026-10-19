@@ -9,7 +9,7 @@ function releaseOf(row) {
   return row.subtitleFileName || row.movieReleaseName || `subtitle-${row.id}.srt`;
 }
 
-function mapRow(row) {
+function mapRow(row, episodeScoped = false) {
   const url = String(row.url || "");
   if (!url || !allowedSubtitleUrl(url)) return null;
   return {
@@ -24,6 +24,7 @@ function mapRow(row) {
     downloadCount: 0,
     hashMatch: false,
     catalogMatch: true,
+    episodeScoped,
     featureDetails: {
       seasonNumber: Number(row.season) || undefined,
       episodeNumber: Number(row.episode) || undefined
@@ -57,7 +58,7 @@ export class StremioV3Provider {
     const rows = await this.rows(context);
     return rows
       .filter((row) => ["ara", "ar", "arb"].includes(String(row.lang || "").toLowerCase()))
-      .map((row) => mapRow(row))
+      .map((row) => mapRow(row, context.media.type === "series"))
       .filter(Boolean);
   }
 

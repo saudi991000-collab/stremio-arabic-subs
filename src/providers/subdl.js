@@ -8,7 +8,7 @@ function positiveNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function mapSubtitle(parent, file, catalogMatch) {
+function mapSubtitle(parent, file, catalogMatch, episodeScoped = false) {
   const downloadRef = file.url || parent.url;
   if (!downloadRef || !allowedDownloadUrl(downloadRef)) return null;
   const language = String(file.language || parent.language || "AR").toUpperCase();
@@ -24,6 +24,7 @@ function mapSubtitle(parent, file, catalogMatch) {
     language: "ar",
     hashMatch: false,
     catalogMatch,
+    episodeScoped,
     fps: positiveNumber(file.fps || parent.fps),
     rating: Number(parent.rating) || 0,
     downloadCount: Number(parent.downloads) || 0,
@@ -82,7 +83,12 @@ export class SubDLProvider {
       for (const subtitle of payload.subtitles || []) {
         const files = subtitle.unpack_files?.length ? subtitle.unpack_files : [subtitle];
         for (const file of files) {
-          const candidate = mapSubtitle(subtitle, file, Boolean(context.media.imdbId));
+          const candidate = mapSubtitle(
+            subtitle,
+            file,
+            Boolean(context.media.imdbId),
+            context.media.type === "series"
+          );
           if (candidate) candidates.push(candidate);
         }
       }
