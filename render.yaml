@@ -33,3 +33,7 @@ services:
         value: "70"
       - key: DOWNLOAD_FALLBACKS
         value: "6"
+      - key: VALIDATE_BEFORE_LISTING
+        value: "true"
+      - key: DEEP_ANALYSIS_CANDIDATES
+        value: "12"
