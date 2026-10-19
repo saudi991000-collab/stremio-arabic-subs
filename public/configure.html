@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+
+  <title>ترجمة النخبة</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #050507;
+      color: #f7f7fa;
+      font-family: system-ui, "Segoe UI", Tahoma, sans-serif;
+    }
+
+    .card {
+      width: min(680px, 100%);
+      padding: 30px;
+      background: #121218;
+      border: 1px solid #292934;
+      border-radius: 24px;
+      box-shadow: 0 30px 80px #0008;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 34px;
+    }
+
+    .tag {
+      margin-bottom: 24px;
+      color: #9b8cff;
+    }
+
+    .status {
+      margin: 18px 0;
+      padding: 14px;
+      background: #1a1a23;
+      border-radius: 12px;
+    }
+
+    code {
+      display: block;
+      direction: ltr;
+      overflow: auto;
+      padding: 14px;
+      background: #08080b;
+      color: #bfffc9;
+      border-radius: 10px;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 22px;
+    }
+
+    a,
+    button {
+      padding: 13px 20px;
+      border: 0;
+      border-radius: 12px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .primary {
+      background: #7c5cff;
+      color: white;
+    }
+
+    .secondary {
+      background: #252532;
+      color: white;
+    }
+
+    ol {
+      line-height: 1.9;
+      color: #d6d6df;
+    }
+
+    .small {
+      margin-top: 20px;
+      color: #9999a8;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="card">
+    <h1>⭐ ترجمة النخبة</h1>
+
+    <div class="tag">
+      أفضل الترجمات العربية المطابقة لإصدار الفيديو
+    </div>
+
+    <p>رابط الإضافة:</p>
+
+    <code id="manifest">{{MANIFEST_URL}}</code>
+
+    <div class="status" id="status">
+      جاري فحص الخادم…
+    </div>
+
+    <ol>
+      <li>تأكد من إضافة مفاتيح المصادر داخل Environment في Render.</li>
+      <li>اضغط زر تثبيت الإضافة.</li>
+      <li>اختر العربية كلغة الترجمة المفضلة في Stremio.</li>
+      <li>ستظهر النتائج الموثوقة أولًا ثم الخيارات الاحتياطية.</li>
+    </ol>
+
+    <div class="buttons">
+      <a class="primary" href="{{STREMIO_URL}}">
+        تثبيت في Stremio
+      </a>
+
+      <button
+        id="copy"
+        class="secondary"
+        type="button"
+        onclick="copyManifest()"
+      >
+        نسخ الرابط
+      </button>
+    </div>
+
+    <p class="small">
+      إذا لم يعمل زر التثبيت، انسخ رابط الإضافة والصقه داخل قسم
+      Add-ons في Stremio ثم اضغط Enter وInstall.
+    </p>
+
+    <div class="small">
+      تعرض الإضافة حتى 25 ترجمة عربية وتحافظ على صيغ
+      SRT وVTT وASS وSSA، بما فيها الألوان والتنسيقات المتقدمة.
+      تظهر علامة 👍 للنتائج الموصى بها وعلامة 💪 للترجمات ذات
+      التنسيق المتقدم.
+    </div>
+  </main>
+
+  <script>
+    async function copyManifest() {
+      const value =
+        document.querySelector("#manifest").textContent.trim();
+
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch {
+        const field = document.createElement("textarea");
+        field.value = value;
+        document.body.appendChild(field);
+        field.select();
+        document.execCommand("copy");
+        field.remove();
+      }
+
+      const button = document.querySelector("#copy");
+      button.textContent = "تم النسخ ✓";
+
+      setTimeout(() => {
+        button.textContent = "نسخ الرابط";
+      }, 2500);
+    }
+
+    fetch("/health")
+      .then(response => response.json())
+      .then(data => {
+        const names = {
+          opensubtitles: "OpenSubtitles",
+          subdl: "SubDL",
+          subsource: "SubSource",
+          arabicsubs: "ArabicSubs",
+          "stremio-v3": "OpenSubtitles v3",
+          custom: "مصدر مخصص"
+        };
+
+        const providers = (data.providers || [])
+          .map(provider => names[provider] || provider)
+          .join("، ");
+
+        const status = document.querySelector("#status");
+
+        if (providers) {
+          status.textContent =
+            "الخادم جاهز. المصادر المفعلة: " + providers;
+        } else {
+          status.textContent =
+            "الخادم يعمل، لكن لم يتم اكتشاف مصادر ترجمة مفعلة.";
+        }
+      })
+      .catch(() => {
+        document.querySelector("#status").textContent =
+          "تعذر الوصول إلى الخادم.";
+      });
+  </script>
+</body>
+</html>
