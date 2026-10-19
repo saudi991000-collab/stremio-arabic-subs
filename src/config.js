@@ -23,13 +23,13 @@ export function readConfig(env = process.env) {
     minConfidence: int(env.MIN_CONFIDENCE, 70, 0, 100),
     maxResults: int(env.MAX_RESULTS, 25, 1, 25),
     downloadFallbacks: int(env.DOWNLOAD_FALLBACKS, 4, 1, 6),
-    maxSearchPages: int(env.MAX_SEARCH_PAGES, 2, 1, 10),
-    deepAnalysisCandidates: int(env.DEEP_ANALYSIS_CANDIDATES, 12, 0, 25),
-    deepAnalysisTimeoutMs: int(env.DEEP_ANALYSIS_TIMEOUT_MS, 6500, 1000, 30000),
-    listingDeadlineMs: int(env.LISTING_DEADLINE_MS, 11000, 3000, 12000),
-    providerSearchTimeoutMs: int(env.PROVIDER_SEARCH_TIMEOUT_MS, 4000, 1000, 10000),
+    maxSearchPages: int(env.MAX_SEARCH_PAGES, 4, 1, 10),
+    deepAnalysisCandidates: int(env.DEEP_ANALYSIS_CANDIDATES, 25, 0, 25),
+    deepAnalysisTimeoutMs: int(env.DEEP_ANALYSIS_TIMEOUT_MS, 7500, 1000, 30000),
+    listingDeadlineMs: int(env.LISTING_DEADLINE_MS, 11500, 3000, 12000),
+    providerSearchTimeoutMs: int(env.PROVIDER_SEARCH_TIMEOUT_MS, 5000, 1000, 10000),
     onDemandSyncTimeoutMs: int(env.ON_DEMAND_SYNC_TIMEOUT_MS, 7000, 1000, 10000),
-    companionWaitMs: int(env.COMPANION_WAIT_MS, 1200, 0, 5000),
+    companionWaitMs: int(env.COMPANION_WAIT_MS, 0, 0, 5000),
     ffprobePath: env.STREMIO_FFPROBE_PATH || (localPrograms ? path.join(localPrograms, "ffprobe.exe") : "ffprobe"),
     ffmpegPath: env.STREMIO_FFMPEG_PATH || (localPrograms ? path.join(localPrograms, "ffmpeg.exe") : "ffmpeg"),
     whisperPath: path.resolve(env.WHISPER_PATH || "tools/whisper/bin/Release/whisper-cli.exe"),
@@ -49,7 +49,7 @@ export function readConfig(env = process.env) {
       username: env.OPENSUBTITLES_USERNAME || "",
       password: env.OPENSUBTITLES_PASSWORD || "",
       baseUrl: "https://api.opensubtitles.com/api/v1",
-      userAgent: "ArabicEliteSubs v3.2.0"
+      userAgent: "ArabicEliteSubs v3.2.1"
     },
     subdl: {
       apiKey: env.SUBDL_API_KEY || "",

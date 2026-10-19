@@ -197,7 +197,15 @@ export function normalizeSubtitle(buffer, selector = {}) {
   const sourceExtension = detectedAss ? (hintedExtension === "ssa" ? "ssa" : "ass") : detectedVtt ? "vtt" : hintedExtension || "srt";
   const requestedExtension = String(selector.outputExtension || sourceExtension).toLowerCase();
   const shouldConvertAss = detectedAss && requestedExtension === "srt" && selector.preserveFormat !== true;
-  const normalizedText = shouldConvertAss ? assToSrt(decoded.text) : decoded.text;
+  // Some providers mislabel SRT files that contain ASS override commands such
+  // as {\an8}. Stremio renders those commands as visible garbage because the
+  // surrounding file is not actually ASS. Preserve real ASS/SSA files, but
+  // remove override commands from plain SRT/VTT text.
+  const normalizedText = shouldConvertAss
+    ? assToSrt(decoded.text)
+    : detectedAss
+      ? decoded.text
+      : decoded.text.replace(/\{\\[^{}]+\}/g, "");
   const extension = shouldConvertAss ? "srt" : sourceExtension;
   if (requestedExtension !== extension && selector.allowFormatMismatch !== true) {
     throw new Error(`Subtitle format mismatch: expected ${requestedExtension}, received ${extension}`);
