@@ -49,7 +49,7 @@ export function readConfig(env = process.env) {
       username: env.OPENSUBTITLES_USERNAME || "",
       password: env.OPENSUBTITLES_PASSWORD || "",
       baseUrl: "https://api.opensubtitles.com/api/v1",
-      userAgent: "ArabicEliteSubs v3.4.0"
+      userAgent: "ArabicEliteSubs v3.5.0"
     },
     subdl: {
       apiKey: env.SUBDL_API_KEY || "",
@@ -75,6 +75,12 @@ export function readConfig(env = process.env) {
     },
     anikoto: {
       baseUrl: "https://watch.reyamika.eu.cc"
+    },
+    theSubtitleDb: {
+      baseUrl: "https://api.thesubtitledb.org/v1"
+    },
+    mora: {
+      metadataUrl: "https://archive.org/metadata/mora25r"
     }
   };
 }

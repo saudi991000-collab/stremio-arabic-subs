@@ -48,6 +48,14 @@ test("accepts valid UTF-8 Arabic SRT", () => {
   assert.match(normalized.buffer.toString("utf8"), /مرحباً بكم/);
 });
 
+test("removes visible ASS override commands from a mislabeled SRT", () => {
+  const source = Buffer.from("1\n00:00:01,000 --> 00:00:03,000\n{\\an8}{\\c&H00FFFF&}لا أقدر. هيا بنا!\n");
+  const normalized = normalizeSubtitle(source, { fileName: "episode.srt", outputExtension: "srt" });
+  const text = normalized.buffer.toString("utf8");
+  assert.doesNotMatch(text, /\\an8|\\c&H/i);
+  assert.match(text, /لا أقدر/);
+});
+
 test("decodes a Windows-1256 Arabic SRT", () => {
   const prefix = Buffer.from("1\n00:00:01,000 --> 00:00:03,000\n");
   const arabicBytes = Buffer.from([0xe3, 0xd1, 0xcd, 0xc8, 0xc7, 0x20, 0xc8, 0xdf, 0xe3, 0x20, 0xdd, 0xed, 0x20, 0xc7, 0xe1, 0xc7, 0xce, 0xca, 0xc8, 0xc7, 0xd1, 0x20, 0xc7, 0xe1, 0xcd, 0xde, 0xed, 0xde, 0xed, 0x2e]);
@@ -99,4 +107,25 @@ test("preserves Arabic ASS styling by default and converts only for an SRT outpu
   });
   assert.equal(preservedDespiteHint.extension, "ass");
   assert.match(preservedDespiteHint.buffer.toString("utf8"), /\\an2/);
+});
+
+test("converts WebVTT to SRT when the public URL promises SRT", () => {
+  const vtt = "WEBVTT\n\n00:01.000 --> 00:03.250 align:middle\nمرحباً بكم في ترجمة عربية بشرية سليمة.\n";
+  const normalized = normalizeSubtitle(Buffer.from(vtt), { fileName: "episode.vtt", outputExtension: "srt" });
+  assert.equal(normalized.extension, "srt");
+  assert.match(normalized.buffer.toString("utf8"), /00:00:01,000 --> 00:00:03,250/);
+});
+
+test("converts SBV, SAMI, TTML and MicroDVD text subtitles to SRT", () => {
+  const fixtures = [
+    ["episode.sbv", "0:00:01.000,0:00:03.000\nهذه ترجمة عربية بشرية سليمة للاختبار.\n", {}],
+    ["episode.smi", "<SAMI><BODY><SYNC Start=1000><P>هذه ترجمة عربية بشرية سليمة للاختبار.<SYNC Start=3000><P>نهاية المشهد العربي.</BODY></SAMI>", {}],
+    ["episode.ttml", "<tt><body><div><p begin=\"00:00:01.000\" end=\"00:00:03.000\">هذه ترجمة عربية بشرية سليمة للاختبار.</p></div></body></tt>", {}],
+    ["episode.sub", "{25}{75}هذه ترجمة عربية بشرية سليمة للاختبار.\n", { fps: 25 }]
+  ];
+  for (const [fileName, source, extra] of fixtures) {
+    const normalized = normalizeSubtitle(Buffer.from(source), { fileName, outputExtension: "srt", ...extra });
+    assert.equal(normalized.extension, "srt", fileName);
+    assert.equal(normalized.analysis.valid, true, fileName);
+  }
 });

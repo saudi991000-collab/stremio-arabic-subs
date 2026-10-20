@@ -23,8 +23,9 @@ async function loadNormalized(candidate, context, provider, cache, requireArabic
       season: context.media.season,
       episode: context.media.episode,
       fileName: candidate.fileName,
+      fps: candidate.fps,
       requireArabic,
-      preserveFormat: true,
+      preserveFormat: false,
       allowFormatMismatch: true
     });
   } else {
@@ -38,8 +39,9 @@ async function loadNormalized(candidate, context, provider, cache, requireArabic
       season: context.media.season,
       episode: context.media.episode,
       fileName: downloaded.fileName || candidate.fileName,
+      fps: candidate.fps,
       requireArabic,
-      preserveFormat: true,
+      preserveFormat: false,
       allowFormatMismatch: true
     });
     buffer = normalized.buffer;
@@ -92,7 +94,7 @@ function applyEvidence(candidate, inspected, reference) {
   }
   if (candidate.reasons.includes("exact-hash")) confidence = 100;
   else confidence = Math.max(5, Math.min(99, Math.round(confidence)));
-  const tier = candidate.reasons.includes("exact-hash") ? 4 : candidate.reasons.includes("exact-release") ? 3 : confidence >= 70 ? 2 : 1;
+  const tier = candidate.reasons.includes("exact-hash") ? 4 : candidate.reasons.some((reason) => ["exact-release", "strong-release-match"].includes(reason)) ? 3 : confidence >= 70 ? 2 : 1;
   return {
     ...candidate,
     reasons,
@@ -116,7 +118,7 @@ function presentationTier(candidate) {
   if (candidate.reasons?.includes("exact-hash")) return 5;
   if ((candidate.timingScore || 0) >= 0.82) return 4;
   if (candidate.styled && candidate.confidence >= 65 && !candidate.reasons?.includes("timing-mismatch")) return 3;
-  if (candidate.reasons?.includes("exact-release")) return 2;
+  if (candidate.reasons?.some((reason) => ["exact-release", "strong-release-match"].includes(reason))) return 2;
   if (candidate.deepAnalyzed) return 2;
   return 1;
 }

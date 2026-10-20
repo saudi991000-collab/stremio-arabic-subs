@@ -1,6 +1,6 @@
 export const manifest = {
   id: "org.arabic.elitesubs.v3",
-  version: "3.4.0",
+  version: "3.5.0",
   name: "⭐ ترجمة النخبة",
   description: "أفضل 25 ترجمة عربية بشرية مرتبة حسب العمل والحلقة وإصدار الفيديو، مع دعم SRT وVTT وASS وSSA.",
   logo: "https://raw.githubusercontent.com/Stremio/stremio-addon-sdk/master/assets/stremio-logo.png",

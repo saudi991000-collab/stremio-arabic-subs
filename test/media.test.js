@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReleaseName, parseVideoId, releaseTitle, titlesLikelyMatch } from "../src/media.js";
+import { parseReleaseName, parseVideoId, releaseTitle, titleSimilarity, titlesLikelyMatch } from "../src/media.js";
 
 test("parses a series release", () => {
   const value = parseReleaseName("Show.Name.S02E06.1080p.WEB-DL.x265-GROUP.mkv");
@@ -33,4 +33,5 @@ test("extracts the work title before episode and release metadata", () => {
   assert.equal(releaseTitle("[NanakoRaws] Koori no Jouheki - 04 (AT-X 1080p HEVC AAC).mkv"), "koori no jouheki");
   assert.equal(titlesLikelyMatch("Koori no Jouheki - 04.mkv", "Koori no Jyouheki"), true);
   assert.equal(titlesLikelyMatch("Wednesday.S01E02.mkv", "Death Note"), false);
+  assert.ok(titleSimilarity("Boku no Hero Academia S07E03", "Boku no Hero Akademia 03") >= 0.45);
 });

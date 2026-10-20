@@ -21,6 +21,9 @@ import { WyzieProvider } from "./providers/wyzie.js";
 import { SubKongProvider } from "./providers/subkong.js";
 import { MiraiAnimeProvider } from "./providers/miraianime.js";
 import { AniKotoProvider } from "./providers/anikoto.js";
+import { TheSubtitleDbProvider } from "./providers/thesubtitledb.js";
+import { MoraProvider } from "./providers/mora.js";
+import { Subf2mProvider } from "./providers/subf2m.js";
 import { MultiProvider } from "./providers/multi.js";
 import { deepAnalyzeCandidates, normalizedSubtitleCacheKey } from "./deep-analyzer.js";
 import { retimeSubtitle } from "./timing.js";
@@ -36,7 +39,7 @@ const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const embeddedConfigurePage = `<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ترجمة النخبة</title><style>body{margin:0;background:#0d0b18;color:#fff;font-family:system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:620px;margin:24px;padding:34px;border:1px solid #7c5cff;border-radius:22px;background:#171328;text-align:center}h1{margin-top:0}p{color:#cbc5df;line-height:1.8}.button{display:inline-block;margin:10px;padding:14px 24px;border-radius:14px;background:#7c5cff;color:white;text-decoration:none;font-weight:700}.url{direction:ltr;word-break:break-all;background:#0b0912;padding:12px;border-radius:10px}</style></head>
-<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 25 ترجمة عربية بشرية مرتبة، مع دعم SRT وVTT وASS وSSA.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div></main></body></html>`;
+<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 25 ترجمة عربية بشرية مرتبة، مع دعم صيغ الترجمة النصية وتحويلها تلقائياً إلى صيغة متوافقة مع Stremio.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div></main></body></html>`;
 
 function json(response, status, data, extraHeaders = {}) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", ...extraHeaders });
@@ -75,9 +78,31 @@ function baseUrl(request, config) {
 }
 
 function extensionOf(candidate) {
-  if (candidate?.actualFormat) return candidate.actualFormat;
+  if (candidate?.actualFormat) return /^(?:srt|vtt|ass|ssa)$/.test(candidate.actualFormat) ? candidate.actualFormat : "srt";
   const fileName = typeof candidate === "string" ? candidate : candidate?.fileName || candidate?.release || "";
-  return String(fileName).toLowerCase().match(/\.(srt|vtt|ass|ssa)$/)?.[1] || "srt";
+  const format = String(fileName).toLowerCase().match(/\.(srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/)?.[1] || "srt";
+  return /^(?:srt|vtt|ass|ssa)$/.test(format) ? format : "srt";
+}
+
+function selectDiverseCandidates(candidates, limit) {
+  const selected = [];
+  const deferred = [];
+  const counts = new Map();
+  const perProvider = Math.max(3, Math.ceil(limit / 4));
+  for (const candidate of candidates) {
+    const providerId = candidate.provider || "default";
+    const count = counts.get(providerId) || 0;
+    if (count < perProvider) {
+      selected.push(candidate);
+      counts.set(providerId, count + 1);
+    } else deferred.push(candidate);
+    if (selected.length >= limit) return selected;
+  }
+  for (const candidate of deferred) {
+    selected.push(candidate);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }
 
 function within(promise, timeoutMs, fallback) {
@@ -137,6 +162,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     ...(config.subsource.apiKey ? [new SubSourceProvider(config.subsource)] : []),
     ...(config.arabicSubs.apiKey ? [new ArabicSubsProvider(config.arabicSubs)] : []),
     ...(config.wyzie.apiKey ? [new WyzieProvider(config.wyzie)] : []),
+    new TheSubtitleDbProvider(config.theSubtitleDb),
+    new Subf2mProvider(),
+    new MoraProvider(config.mora),
     new SubKongProvider(config.subkong),
     new MiraiAnimeProvider(config.miraianime),
     new AniKotoProvider(config.anikoto),
@@ -267,19 +295,18 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
         const usable = ranked.filter((candidate) =>
           candidate.confidence >= 5 &&
-          !candidate.downloadFailed &&
-          (!requireVerifiedDownload || candidate.deepAnalyzed === true)
+          !candidate.downloadFailed
         );
         const eligible = requireVerifiedDownload
-          ? usable.filter((candidate) =>
-            candidate.confidence >= config.minConfidence &&
-            !candidate.reasons?.includes("timing-mismatch")
-          )
+          ? [
+            ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
+            ...usable.filter((candidate) => candidate.deepAnalyzed !== true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch"))
+          ]
           : [
             ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
             ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
           ];
-        const selected = config.resultMode === "best" ? eligible.slice(0, 1) : eligible.slice(0, config.maxResults);
+        const selected = config.resultMode === "best" ? eligible.slice(0, 1) : selectDiverseCandidates(eligible, config.maxResults);
         const subtitles = selected.map((candidate, index) => {
           const extension = extensionOf(candidate);
           const fallback = fallbackCandidates(eligible, candidate, extension, config.downloadFallbacks);
@@ -291,6 +318,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             episode: item.featureDetails?.episodeNumber ?? parseReleaseName(item.fileName || item.release || "").episode ?? media.episode,
             fileName: item.fileName || item.release || `subtitle.${extensionOf(item)}`,
             extension: extensionOf(item),
+            fps: item.fps,
             confidence: item.confidence,
             reasons: item.reasons || [],
             syncScore: item.syncScore || 0,
@@ -303,7 +331,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             id: `arabic-syncrank-${stableId}`,
             url: `${baseUrl(request, config)}/subtitle/${token}.${extension}`,
             lang: "ara",
-            label: `${index + 1} | ${resultLabel(candidate, { recommended: index === 0 })} | ${extension.toUpperCase()} | ${candidate.provider || "مصدر"}`
+            label: `${index + 1}${resultLabel(candidate) ? ` ${resultLabel(candidate)}` : ""}`
           };
         });
         logger.info("subtitle search completed", {
@@ -350,7 +378,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
                 episode: item.episode,
                 fileName: downloaded.fileName || item.fileName,
                 outputExtension: payload.extension,
-                preserveFormat: true,
+                fps: item.fps,
+                preserveFormat: false,
                 allowFormatMismatch: true
               });
               if (item.episode != null && normalized.analysis.durationSeconds > config.maxSeriesSubtitleSeconds) {

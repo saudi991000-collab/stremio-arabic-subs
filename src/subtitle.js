@@ -2,6 +2,7 @@ import { gunzipSync, inflateRawSync } from "node:zlib";
 
 const MAX_SUBTITLE_BYTES = 12 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024;
+const ARCHIVE_TEXT_FORMAT = /\.(srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/i;
 
 function stripAssAttachments(buffer, fileName) {
   if (!/\.(?:ass|ssa)$/i.test(String(fileName || "")) && !/^\s*\ufeff?\[Script Info\]/i.test(buffer.subarray(0, 256).toString("utf8"))) return buffer;
@@ -60,7 +61,7 @@ export function extractArchive(buffer, selector = {}) {
     const commentLength = buffer.readUInt16LE(offset + 32);
     const localOffset = buffer.readUInt32LE(offset + 42);
     const fileName = buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
-    if (/\.(srt|vtt|ass|ssa)$/i.test(fileName)) options.push({ method, compressedSize, uncompressedSize, localOffset, fileName });
+    if (ARCHIVE_TEXT_FORMAT.test(fileName)) options.push({ method, compressedSize, uncompressedSize, localOffset, fileName });
     offset += 46 + nameLength + extraLength + commentLength;
   }
   let entry = options[0];
@@ -197,28 +198,160 @@ export function assToSrt(text) {
   return `${cues.join("\n\n")}\n`;
 }
 
+function srtClock(seconds) {
+  const milliseconds = Math.round(Math.max(0, Number(seconds) || 0) * 1000);
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const secs = Math.floor((milliseconds % 60_000) / 1000);
+  const millis = milliseconds % 1000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
+}
+
+function parseFlexibleClock(value) {
+  const text = String(value || "").trim();
+  const secondsOnly = text.match(/^(\d+(?:\.\d+)?)s$/i);
+  if (secondsOnly) return Number(secondsOnly[1]);
+  const clock = text.match(/^(?:(\d+):)?(\d{1,2}):(\d{2})(?:[,.](\d{1,3}))?$/);
+  if (!clock) return null;
+  return Number(clock[1] || 0) * 3600 + Number(clock[2]) * 60 + Number(clock[3]) + Number(String(clock[4] || "0").padEnd(3, "0")) / 1000;
+}
+
+function decodeEntities(value) {
+  return String(value)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lrm;|&rlm;/gi, "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)));
+}
+
+function cleanMarkup(value) {
+  return decodeEntities(String(value)
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\r/g, ""))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function cuesToSrt(cues) {
+  const arabic = cues.filter((cue) => /[\u0600-\u06ff]/.test(cue.text) && cue.end > cue.start);
+  if (!arabic.length) throw new Error("Subtitle does not contain Arabic dialogue cues");
+  return `${arabic.map((cue, index) => `${index + 1}\n${srtClock(cue.start)} --> ${srtClock(cue.end)}\n${cue.text}`).join("\n\n")}\n`;
+}
+
+function sbvToSrt(text) {
+  const cues = [];
+  for (const block of String(text).split(/\r?\n\s*\r?\n/)) {
+    const lines = block.split(/\r?\n/);
+    const timing = lines.shift()?.match(/^\s*([^,]+),\s*([^,]+)\s*$/);
+    if (!timing) continue;
+    const start = parseFlexibleClock(timing[1]);
+    const end = parseFlexibleClock(timing[2]);
+    if (start == null || end == null) continue;
+    cues.push({ start, end, text: cleanMarkup(lines.join("\n")) });
+  }
+  return cuesToSrt(cues);
+}
+
+function vttToSrt(text) {
+  const cues = [];
+  const source = String(text).replace(/^\ufeff?WEBVTT[^\r\n]*\r?\n/i, "");
+  for (const block of source.split(/\r?\n\s*\r?\n/)) {
+    const lines = block.split(/\r?\n/).filter((line) => !/^NOTE(?:\s|$)/i.test(line));
+    const timingIndex = lines.findIndex((line) => /-->/.test(line));
+    if (timingIndex < 0) continue;
+    const timing = lines[timingIndex].match(/^\s*([^\s]+)\s*-->\s*([^\s]+)(?:\s+.*)?$/);
+    if (!timing) continue;
+    const start = parseFlexibleClock(timing[1]);
+    const end = parseFlexibleClock(timing[2]);
+    if (start == null || end == null) continue;
+    cues.push({ start, end, text: cleanMarkup(lines.slice(timingIndex + 1).join("\n")) });
+  }
+  return cuesToSrt(cues);
+}
+
+function samiToSrt(text) {
+  const matches = [...String(text).matchAll(/<sync\b[^>]*\bstart\s*=\s*["']?(\d+)["']?[^>]*>([\s\S]*?)(?=<sync\b|$)/gi)];
+  return cuesToSrt(matches.map((match, index) => ({
+    start: Number(match[1]) / 1000,
+    end: Number(matches[index + 1]?.[1] || Number(match[1]) + 4000) / 1000,
+    text: cleanMarkup(match[2])
+  })));
+}
+
+function ttmlToSrt(text) {
+  const cues = [];
+  for (const match of String(text).matchAll(/<p\b([^>]*)>([\s\S]*?)<\/p>/gi)) {
+    const begin = match[1].match(/\bbegin\s*=\s*["']([^"']+)["']/i)?.[1];
+    const endValue = match[1].match(/\bend\s*=\s*["']([^"']+)["']/i)?.[1];
+    const duration = match[1].match(/\bdur\s*=\s*["']([^"']+)["']/i)?.[1];
+    const start = parseFlexibleClock(begin);
+    const end = parseFlexibleClock(endValue) ?? (start == null ? null : start + (parseFlexibleClock(duration) || 0));
+    if (start == null || end == null) continue;
+    cues.push({ start, end, text: cleanMarkup(match[2]) });
+  }
+  return cuesToSrt(cues);
+}
+
+function subToSrt(text, fpsHint) {
+  const raw = String(text);
+  const microDvd = [...raw.matchAll(/^\{(\d+)\}\{(\d+)\}(.*)$/gm)];
+  if (microDvd.length) {
+    const declaredFps = microDvd.find((match) => match[1] === "1" && match[2] === "1" && /^\d+(?:\.\d+)?$/.test(match[3].trim()))?.[3];
+    const fps = Number(fpsHint || declaredFps);
+    if (!Number.isFinite(fps) || fps <= 0) throw new Error("MicroDVD subtitle requires a valid frame rate");
+    return cuesToSrt(microDvd
+      .filter((match) => !(match[1] === "1" && match[2] === "1" && match[3].trim() === declaredFps?.trim()))
+      .map((match) => ({ start: Number(match[1]) / fps, end: Number(match[2]) / fps, text: cleanMarkup(match[3].replace(/\|/g, "\n")) })));
+  }
+  const mpl2 = [...raw.matchAll(/^\[(\d+)\]\[(\d+)\](.*)$/gm)];
+  if (mpl2.length) return cuesToSrt(mpl2.map((match) => ({ start: Number(match[1]) / 10, end: Number(match[2]) / 10, text: cleanMarkup(match[3].replace(/\|/g, "\n")) })));
+  throw new Error("Unsupported SUB subtitle encoding");
+}
+
 export function normalizeSubtitle(buffer, selector = {}) {
   const extracted = extractArchive(buffer, selector);
   const requireArabic = selector.requireArabic !== false;
   const decoded = decodeArabic(extracted.buffer, { requireArabic });
-  const originalAnalysis = analyzeSubtitle(decoded.text, { requireArabic });
-  if (!originalAnalysis.valid) throw new Error("Downloaded file is not a valid Arabic subtitle");
-  const hintedExtension = extracted.fileName.toLowerCase().match(/\.(srt|vtt|ass|ssa)$/)?.[1];
+  const hintedExtension = extracted.fileName.toLowerCase().match(/\.(srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/)?.[1];
   const detectedAss = hintedExtension === "ass" || hintedExtension === "ssa" || /^\s*\ufeff?\[Script Info\]/i.test(decoded.text);
   const detectedVtt = /^\s*\ufeff?WEBVTT\b/i.test(decoded.text);
-  const sourceExtension = detectedAss ? (hintedExtension === "ssa" ? "ssa" : "ass") : detectedVtt ? "vtt" : hintedExtension || "srt";
+  const detectedSami = /<sami\b|<sync\b[^>]*\bstart\s*=/i.test(decoded.text);
+  const detectedTtml = /<(?:tt|ttml)\b|<p\b[^>]*\bbegin\s*=/i.test(decoded.text);
+  const detectedSbv = /^\s*(?:\d+:)?\d{1,2}:\d{2}[.,]\d+\s*,\s*(?:\d+:)?\d{1,2}:\d{2}[.,]\d+\s*$/m.test(decoded.text);
+  const detectedSub = /^\s*(?:\{\d+\}\{\d+\}|\[\d+\]\[\d+\])/m.test(decoded.text);
+  const sourceExtension = detectedAss
+    ? (hintedExtension === "ssa" ? "ssa" : "ass")
+    : detectedVtt ? "vtt"
+      : detectedSami ? (hintedExtension === "sami" ? "sami" : "smi")
+        : detectedTtml ? (hintedExtension === "dfxp" ? "dfxp" : "ttml")
+          : detectedSbv ? "sbv"
+            : detectedSub ? "sub"
+              : hintedExtension || "srt";
   const requestedExtension = String(selector.outputExtension || sourceExtension).toLowerCase();
-  const shouldConvertAss = detectedAss && requestedExtension === "srt" && selector.preserveFormat !== true;
+  const shouldConvert = selector.preserveFormat !== true && requestedExtension === "srt";
   // Some providers mislabel SRT files that contain ASS override commands such
   // as {\an8}. Stremio renders those commands as visible garbage because the
   // surrounding file is not actually ASS. Preserve real ASS/SSA files, but
   // remove override commands from plain SRT/VTT text.
-  const normalizedText = shouldConvertAss
-    ? assToSrt(decoded.text)
-    : detectedAss
-      ? decoded.text
-      : decoded.text.replace(/\{\\[^{}]+\}/g, "");
-  const extension = shouldConvertAss ? "srt" : sourceExtension;
+  let normalizedText;
+  let extension = sourceExtension;
+  if (shouldConvert && detectedAss) normalizedText = assToSrt(decoded.text);
+  else if (shouldConvert && detectedVtt) normalizedText = vttToSrt(decoded.text);
+  else if (detectedSami) normalizedText = samiToSrt(decoded.text);
+  else if (detectedTtml) normalizedText = ttmlToSrt(decoded.text);
+  else if (detectedSbv) normalizedText = sbvToSrt(decoded.text);
+  else if (detectedSub) normalizedText = subToSrt(decoded.text, selector.fps);
+  else if (detectedAss) normalizedText = decoded.text;
+  else normalizedText = decoded.text.replace(/\{\\[^{}]+\}/g, "");
+  if ((shouldConvert && (detectedAss || detectedVtt)) || detectedSami || detectedTtml || detectedSbv || detectedSub) extension = "srt";
   if (requestedExtension !== extension && selector.allowFormatMismatch !== true) {
     throw new Error(`Subtitle format mismatch: expected ${requestedExtension}, received ${extension}`);
   }

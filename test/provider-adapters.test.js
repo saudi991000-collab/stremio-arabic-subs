@@ -5,6 +5,13 @@ import { SubSourceProvider } from "../src/providers/subsource.js";
 import { ArabicSubsProvider } from "../src/providers/arabicsubs.js";
 import { OpenSubtitlesProvider } from "../src/providers/opensubtitles.js";
 import { StremioV3Provider } from "../src/providers/stremio-v3.js";
+import { WyzieProvider } from "../src/providers/wyzie.js";
+import { SubKongProvider } from "../src/providers/subkong.js";
+import { MiraiAnimeProvider } from "../src/providers/miraianime.js";
+import { AniKotoProvider } from "../src/providers/anikoto.js";
+import { TheSubtitleDbProvider } from "../src/providers/thesubtitledb.js";
+import { MoraProvider } from "../src/providers/mora.js";
+import { Subf2mProvider } from "../src/providers/subf2m.js";
 
 const context = {
   media: { type: "series", imdbId: "994314", season: 1, episode: 7 },
@@ -17,6 +24,47 @@ async function withMockFetch(handler, callback) {
   try { await callback(); }
   finally { globalThis.fetch = original; }
 }
+
+test("maps episode-scoped human Arabic TheSubtitleDB results", async () => {
+  let requested = "";
+  await withMockFetch(async (url) => {
+    requested = String(url);
+    return new Response(JSON.stringify({ title: { year: 2006 }, subtitles: { items: [
+      { id: 77, language: "ar", release_name: "[3ASQ] Code Geass S01E07", format: "ass", bytes: 4567 },
+      { id: 78, language: "en", release_name: "English", format: "srt" }
+    ] } }), { status: 200 });
+  }, async () => {
+    const results = await new TheSubtitleDbProvider().search(context);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].provider, "thesubtitledb");
+    assert.equal(results[0].episodeScoped, true);
+    assert.equal(results[0].machineTranslated, false);
+    assert.match(results[0].fileName, /\.ass$/);
+  });
+  assert.match(requested, /by-imdb\/tt994314\/season\/1\/episode\/7/);
+  assert.match(requested, /lang=ar/);
+});
+
+test("finds matching Arabic subtitles in the Mora archive without unrelated titles", async () => {
+  await withMockFetch(async () => new Response(JSON.stringify({ files: [
+    { name: "Code.Geass.S01E07.3ASQ.srt", size: "1200" },
+    { name: "Unrelated.Show.S01E07.srt", size: "1200" },
+    { name: "cover.jpg", size: "100" }
+  ] }), { status: 200 }), async () => {
+    const results = await new MoraProvider().search(context);
+    assert.deepEqual(results.map((item) => item.fileName), ["Code.Geass.S01E07.3ASQ.srt"]);
+  });
+});
+
+test("parses exact Arabic episode releases from a Subf2m season page", async () => {
+  await withMockFetch(async () => new Response(`<ul><li class="item"><a class="download" href="/subtitles/code-geass-first-season/arabic/777"></a><ul class="scrolllist"><li>Code.Geass.S01E07.ESPADAS.WEB-DL</li><li>Code.Geass.S01E08.ESPADAS.WEB-DL</li></ul><span class="rate good"></span></li></ul>`, { status: 200 }), async () => {
+    const results = await new Subf2mProvider().search(context);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].provider, "subf2m");
+    assert.match(results[0].fileName, /S01E07/);
+    assert.equal(results[0].fromTrusted, true);
+  });
+});
 
 test("maps Arabic SubDL episode results", async () => {
   await withMockFetch(async () => new Response(JSON.stringify({ status: true, subtitles: [{ release_name: "Code.Geass.S01E07.WEB-DL", season: 1, episode: 7, unpack_files: [{ file_n_id: "f1", name: "Code.Geass.S01E07.srt", language: "AR", season: 1, episode: 7, url: "/subtitle/n1/f1" }] }] }), { status: 200 }), async () => {
@@ -83,6 +131,111 @@ test("uses only Arabic results from Stremio v3", async () => {
     assert.equal(arabic.length, 1);
     assert.equal(arabic[0].language, "ar");
   });
+});
+
+test("maps human Arabic Wyzie results and ignores AI translations", async () => {
+  let requestedUrl = "";
+  await withMockFetch(async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify([
+      {
+        id: "w1",
+        url: "https://sub.wyzie.io/c/abc/id/w1?format=ass&tok=secret",
+        format: "ass",
+        language: "ar",
+        source: "foxtrot",
+        release: "Code.Geass.S01E07.BluRay",
+        fileName: "Code.Geass.S01E07.ass",
+        ai: false
+      },
+      {
+        id: "w2",
+        url: "https://sub.wyzie.io/c/abc/id/w2?format=srt&tok=secret",
+        format: "srt",
+        language: "ar",
+        source: "ai",
+        fileName: "generated.srt",
+        ai: true
+      }
+    ]), { status: 200 });
+  }, async () => {
+    const provider = new WyzieProvider({ apiKey: "test-key", baseUrl: "https://sub.wyzie.io" });
+    const results = await provider.search(context);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].provider, "wyzie");
+    assert.equal(results[0].episodeScoped, true);
+    assert.match(results[0].fileName, /\.ass$/);
+    assert.match(requestedUrl, /language=ar/);
+    assert.match(requestedUrl, /source=all/);
+    assert.match(requestedUrl, /season=1/);
+    assert.match(requestedUrl, /episode=7/);
+  });
+});
+
+test("maps episode-scoped Arabic SubKong results", async () => {
+  let requestedUrl = "";
+  await withMockFetch(async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify({ subtitles: [
+      { source: "user", name: "Code.Geass.S01E07.Styled", season: 1, episode: 7, format: "ass", download: "/api/v1/download/user/77" }
+    ] }), { status: 200 });
+  }, async () => {
+    const provider = new SubKongProvider();
+    const results = await provider.search(context);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].provider, "subkong");
+    assert.equal(results[0].episodeScoped, true);
+    assert.match(results[0].fileName, /\.ass$/);
+  });
+  assert.match(requestedUrl, /language=Arabic/);
+  assert.match(requestedUrl, /season=1/);
+  assert.match(requestedUrl, /episode=7/);
+});
+
+test("discovers MiraiAnime ZIP packs for the requested anime episode", async () => {
+  let calls = 0;
+  await withMockFetch(async () => {
+    calls += 1;
+    if (calls === 1) return new Response(JSON.stringify([{ title: "Code Geass", url: "https://miraianime.net/anime/code-geass/" }]), { status: 200 });
+    return new Response('<a class="download-file" href="https://miraianime.net/wp-content/uploads/code-geass.zip">Download</a>', { status: 200 });
+  }, async () => {
+    const provider = new MiraiAnimeProvider();
+    const results = await provider.search(context);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].provider, "miraianime");
+    assert.equal(results[0].featureDetails.episodeNumber, 7);
+    assert.match(results[0].fileName, /S01E07/);
+  });
+});
+
+test("resolves AniKoto and keeps only its Arabic subtitle track with playback headers", async () => {
+  let calls = 0;
+  await withMockFetch(async (url, options = {}) => {
+    calls += 1;
+    if (String(url) === "https://graphql.anilist.co") {
+      assert.equal(options.method, "POST");
+      return new Response(JSON.stringify({ data: { Media: { id: 1575, title: { english: "Code Geass", romaji: "Code Geass" } } } }), { status: 200 });
+    }
+    if (String(url).includes("/episodes/anikoto/1575")) {
+      return new Response(JSON.stringify({ episodes: { sub: [{ id: "watch/anikoto/1575/sub/anikoto-7", number: 7 }] } }), { status: 200 });
+    }
+    if (String(url).includes("/watch/anikoto/1575/sub/anikoto-7")) {
+      return new Response(JSON.stringify({ subtitles: [
+        { url: "https://cdn.example.com/anime/title/subtitles/ara-1.vtt", label: "Arabic", srclang: "en", headers: { Referer: "https://megaplay.buzz/", Origin: "https://megaplay.buzz" } },
+        { url: "https://cdn.example.com/anime/title/subtitles/eng-1.vtt", label: "English", srclang: "en" }
+      ] }), { status: 200 });
+    }
+    throw new Error(`Unexpected AniKoto test URL ${url}`);
+  }, async () => {
+    const provider = new AniKotoProvider();
+    const results = await provider.search(context);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].provider, "anikoto");
+    assert.match(results[0].fileName, /\.vtt$/);
+    const ref = JSON.parse(results[0].downloadRef);
+    assert.equal(ref.headers.Referer, "https://megaplay.buzz/");
+  });
+  assert.equal(calls, 3);
 });
 
 test("uses an English release match as a timing reference when an exact hash reference is unavailable", async () => {

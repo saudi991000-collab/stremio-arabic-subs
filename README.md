@@ -1,18 +1,14 @@
-# ترجمة النخبة 3.1.0
+# Arabic Elite Subtitles 3.5.0
 
-A dependency-free, self-hosted Stremio addon that returns up to 25 ranked human Arabic subtitles. It groups every result under `ara` and puts rank, trust, real format and provider in `label`, so compatible Stremio clients show one Arabic language with multiple variants. It supports SRT, VTT, ASS and SSA and does not generate AI translations. See [README-AR.md](README-AR.md) for complete Arabic setup instructions.
+A dependency-free self-hosted Stremio addon returning up to 25 ranked, human Arabic subtitles. It validates downloads, rejects AI/machine translations, supports SRT/VTT/ASS/SSA and converts SMI/SAMI/SBV/TTML/DFXP/text SUB to UTF-8 SRT.
 
-Requirements: Node.js 22+, an OpenSubtitles.com API consumer key, and a server reachable by the Stremio device.
+Built-in sources include TheSubtitleDB, Subf2m, Mora, SubKong, MiraiAnime, AniKoto and Stremio v3. Optional API-backed sources include OpenSubtitles, SubDL, SubSource, Wyzie and ArabicSubs. A failed provider never blocks the rest.
+
+See [README-AR.md](README-AR.md) and [UPDATE-3.5.0-AR.md](UPDATE-3.5.0-AR.md).
 
 ```powershell
-Copy-Item .env.example .env
-# Edit .env
-./start.ps1
-node --test
+npm test
+npm start
 ```
 
-Install URL: `http://YOUR-SERVER:7000/manifest.json`
-
-Stremio accepts plain HTTP only on `127.0.0.1`. Run `./start-with-tunnel.ps1` to obtain a temporary HTTPS URL for Android TV or another device.
-
-The optional Stremio Enhanced desktop helper is `enhanced/ArabicSyncAutoSelect.plugin.js`.
+Install URL: `https://YOUR-SERVER/manifest.json`

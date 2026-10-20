@@ -14,7 +14,7 @@ test("exact hash beats popularity", () => {
   ], context);
   assert.equal(results[0].fileId, 1);
   assert.equal(results[0].confidence, 100);
-  assert.equal(resultLabel(results[0], { recommended: true }), "✅ موثوقة");
+  assert.equal(resultLabel(results[0], { recommended: true }), "💪👍");
 });
 
 test("rejects the wrong episode", () => {
@@ -68,7 +68,7 @@ test("prefers BluRay over resolution-only matches for a BD Remux video", () => {
     { fileId: 8, fileName: "Show.Name.S02E06.BD.srt", language: "ar" }
   ], bdContext);
   assert.equal(results[0].fileId, 8);
-  assert.match(resultLabel(results[0]), /موثوقة/);
+  assert.equal(resultLabel(results[0]), "💪👍");
 });
 
 test("prefers an explicit episode release over a season pack", () => {
@@ -99,13 +99,13 @@ test("rejects anime releases that explicitly identify another season or episode"
   assert.ok(results[0].confidence >= 70);
 });
 
-test("uses a compact trust label without a misleading percentage or release clutter", () => {
+test("shows the compact emoji only for a strong release-name match", () => {
   const label = resultLabel({
     confidence: 84,
     fileName: "Anime.S01E08.Colored.ass",
-    reasons: ["single-episode"]
+    reasons: ["strong-release-match"]
   }, { recommended: true });
-  assert.equal(label, "💪 👍 موثوقة");
+  assert.equal(label, "💪👍");
   assert.doesNotMatch(label, /\d+%/);
   assert.doesNotMatch(label, /SRT|ASS|OpenSubtitles|Anime/);
 });
@@ -132,6 +132,15 @@ test("trusts a catalog-scoped single episode without inventing a percentage", ()
   assert.doesNotMatch(resultLabel(results[0], { recommended: true }), /\d+%/);
 });
 
+test("trusts an episode-scoped provider even when its filename is generic", () => {
+  const results = rankCandidates([
+    { fileId: 160, fileName: "Arabic subtitle.srt", language: "ar", catalogMatch: true, episodeScoped: true }
+  ], context);
+  assert.equal(results.length, 1);
+  assert.ok(results[0].confidence >= 70);
+  assert.ok(results[0].reasons.includes("episode-catalog"));
+});
+
 test("accepts a movie result scoped to the corrected catalog id", () => {
   const results = rankCandidates([
     { fileId: 17, fileName: "Dune.Part.Two.2024.srt", language: "ar", catalogMatch: true }
@@ -143,8 +152,8 @@ test("accepts a movie result scoped to the corrected catalog id", () => {
   assert.ok(results[0].confidence >= 70);
 });
 
-test("labels lower-confidence options as backups without a percentage", () => {
+test("leaves ordinary options without noisy text", () => {
   const label = resultLabel({ confidence: 55, reasons: [], fileName: "Show.S02E06.srt" });
-  assert.equal(label, "○ احتياطية");
+  assert.equal(label, "");
   assert.doesNotMatch(label, /\d+%/);
 });

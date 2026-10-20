@@ -108,6 +108,10 @@ export function scoreCandidate(candidate, context, preferences = {}) {
     reasons.push("season-pack");
   }
   if (candidate.fromTrusted) qualityScore += 5;
+  if (/\b(?:3asq|espadas|memories(?:[- .]?fansub)?|dac[- .]?subs|mirai[- .]?subs|asahi[- .]?fansubs|arabic[- .]?anime[- .]?team|kaizen)\b/i.test(candidate.fileName || candidate.release || "")) {
+    qualityScore += 6;
+    reasons.push("arabic-fansub");
+  }
   qualityScore += Math.min(5, Math.max(0, Number(candidate.rating) || 0) / 2);
   qualityScore += logarithmicPopularity(Number(candidate.downloadCount));
   if (candidate.aiTranslated) qualityScore -= 12;
@@ -126,6 +130,22 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   // repeated in the subtitle filename.
   const scopedEpisodeMatch = context.media.type === "series" && candidate.episodeScoped === true;
   const episodeEvidence = metadataEpisodeMatch || filenameEpisodeMatch || releaseKind === "episode" || scopedEpisodeMatch;
+  const releaseSignals = [
+    wanted.source && actual.source && compatibleSource(wanted.source, actual.source),
+    same(wanted.platform, actual.platform),
+    same(wanted.group, actual.group),
+    wanted.fps && candidate.fps && Math.abs(wanted.fps - candidate.fps) < 0.02,
+    same(wanted.edition, actual.edition)
+  ].filter(Boolean).length;
+  const strongReleaseMatch = Boolean(
+    titleMatch &&
+    (context.media.type === "movie" || episodeEvidence) &&
+    (exactRelease || releaseSignals >= 1 || same(wanted.resolution, actual.resolution))
+  );
+  if (strongReleaseMatch && !reasons.includes("exact-release")) {
+    syncScore += 160;
+    reasons.push("strong-release-match");
+  }
   let confidence = context.media.type === "series" ? 25 : 45;
   if (metadataEpisodeMatch && filenameEpisodeMatch) {
     confidence += 35;
@@ -163,9 +183,9 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   if (exactHash) {
     tier = 4;
     confidence = 100;
-  } else if (exactRelease) {
+  } else if (exactRelease || strongReleaseMatch) {
     tier = 3;
-    confidence = 98;
+    confidence = exactRelease ? 98 : Math.max(confidence, 92);
   }
   confidence = Math.max(5, Math.min(100, Math.round(confidence)));
 
@@ -188,13 +208,7 @@ export function rankCandidates(candidates, context, preferences = {}) {
 }
 
 export function resultLabel(candidate, options = {}) {
-  const format = candidate.actualFormat || String(candidate.fileName || candidate.release || "")
-    .match(/\.(srt|vtt|ass|ssa)(?:$|[?#])/i)?.[1]?.toLowerCase();
-  const styled = candidate.styled || format === "ass" || format === "ssa";
-  const prefix = styled ? "💪 " : "";
-  if (candidate.reasons?.includes("season-pack")) return `${prefix}▦ حزمة احتياطية`;
-  if (candidate.confidence < 70) return `${prefix}○ احتياطية`;
-  if (candidate.reasons?.includes("exact-hash") || Number(candidate.timingScore) >= 0.65) return `${prefix}✅ موثوقة`;
-  if (options.recommended && candidate.confidence >= 70 && !candidate.reasons.includes("season-pack")) return `${prefix}👍 موثوقة`;
-  return `${prefix}✓ موثوقة`;
+  const matchedName = candidate.reasons?.some((reason) => ["exact-release", "strong-release-match"].includes(reason));
+  const exactMedia = candidate.reasons?.includes("exact-hash");
+  return matchedName || exactMedia ? "💪👍" : "";
 }

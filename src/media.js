@@ -48,12 +48,50 @@ export function titleTokens(value = "") {
   return releaseTitle(value).split(" ").filter((token) => token.length >= 2 && !TITLE_STOP_WORDS.has(token) && !/^\d+$/.test(token));
 }
 
-export function titlesLikelyMatch(left, right) {
+function editDistance(left, right) {
+  if (left === right) return 0;
+  if (!left.length) return right.length;
+  if (!right.length) return left.length;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      current[column] = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1)
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+function tokenLikelyMatches(left, right) {
+  if (left === right) return true;
+  const longest = Math.max(left.length, right.length);
+  if (longest < 5 || Math.abs(left.length - right.length) > 2) return false;
+  return editDistance(left, right) <= Math.max(1, Math.floor(longest * 0.18));
+}
+
+export function titleSimilarity(left, right) {
   const a = [...new Set(titleTokens(left))];
-  const b = new Set(titleTokens(right));
-  if (!a.length || !b.size) return false;
-  const shared = a.filter((token) => b.has(token)).length;
-  return shared >= Math.max(1, Math.ceil(Math.min(a.length, b.size) * 0.5));
+  const b = [...new Set(titleTokens(right))];
+  if (!a.length || !b.length) return 0;
+  const used = new Set();
+  let shared = 0;
+  for (const token of a) {
+    const index = b.findIndex((candidate, candidateIndex) => !used.has(candidateIndex) && tokenLikelyMatches(token, candidate));
+    if (index >= 0) {
+      used.add(index);
+      shared += 1;
+    }
+  }
+  return shared / Math.max(1, Math.min(a.length, b.length));
+}
+
+export function titlesLikelyMatch(left, right) {
+  return titleSimilarity(left, right) >= 0.45;
 }
 
 function firstMatch(text, regex, group = 1) {
