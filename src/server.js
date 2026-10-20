@@ -8,7 +8,7 @@ import { logger } from "./logger.js";
 import { manifest } from "./manifest.js";
 import { parseExtra, parseReleaseName } from "./media.js";
 import { alignMediaToFilename, resolveVideoId } from "./id-resolver.js";
-import { rankCandidates, resultLabel } from "./ranker.js";
+import { arabicFansubTeam, rankCandidates, resultLabel } from "./ranker.js";
 import { signSubtitleToken, verifySubtitleToken } from "./token.js";
 import { normalizeSubtitle } from "./subtitle.js";
 import { Cache } from "./cache.js";
@@ -82,6 +82,81 @@ function extensionOf(candidate) {
   const fileName = typeof candidate === "string" ? candidate : candidate?.fileName || candidate?.release || "";
   const format = String(fileName).toLowerCase().match(/\.(srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/)?.[1] || "srt";
   return /^(?:srt|vtt|ass|ssa)$/.test(format) ? format : "srt";
+}
+
+const PROVIDER_LABELS = {
+  opensubtitles: "OpenSubtitles",
+  subdl: "SubDL",
+  subsource: "SubSource",
+  arabicsubs: "ArabicSubs",
+  wyzie: "Wyzie",
+  thesubtitledb: "TheSubtitleDB",
+  subf2m: "Subf2m",
+  mora: "Mora",
+  subkong: "SubKong",
+  miraianime: "MiraiAnime",
+  anikoto: "AniKoto",
+  "stremio-v3": "OpenSubtitles v3"
+};
+
+const PLATFORM_LABELS = {
+  netflix: "Netflix",
+  crunchyroll: "Crunchyroll",
+  amazon: "Amazon",
+  max: "Max",
+  disney: "Disney+",
+  hulu: "Hulu",
+  "apple-tv": "Apple TV+"
+};
+
+function compactReleaseName(candidate) {
+  return String(candidate.release || candidate.fileName || "")
+    .replace(/^.*[\\/]/, "")
+    .replace(/\.(?:srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 110);
+}
+
+function detailedResultLabel(candidate, index) {
+  const release = compactReleaseName(candidate);
+  const parsed = parseReleaseName(candidate.fileName || candidate.release || "");
+  const team = arabicFansubTeam(candidate);
+  const badges = [resultLabel(candidate), team ? "🇸🇦" : "", candidate.styled ? "🎨" : ""].filter(Boolean).join(" ");
+  const details = [
+    team,
+    PLATFORM_LABELS[parsed.platform],
+    PROVIDER_LABELS[candidate.provider] || candidate.provider || "Custom",
+    extensionOf(candidate).toUpperCase(),
+    release
+  ].filter(Boolean);
+  return `${index + 1}${badges ? ` ${badges}` : ""} | ${details.join(" • ")}`;
+}
+
+function displayBadgeProfile(candidate) {
+  const matched = Boolean(resultLabel(candidate));
+  const arabicTeam = Boolean(arabicFansubTeam(candidate));
+  const styled = Boolean(candidate.styled);
+  return {
+    // 💪👍 count as two visible badges, followed by 🇸🇦 then 🎨.
+    count: (matched ? 2 : 0) + (arabicTeam ? 1 : 0) + (styled ? 1 : 0),
+    matched,
+    arabicTeam,
+    styled
+  };
+}
+
+function sortForDisplay(candidates) {
+  return candidates
+    .map((candidate, originalIndex) => ({ candidate, originalIndex, badges: displayBadgeProfile(candidate) }))
+    .sort((a, b) =>
+      b.badges.count - a.badges.count ||
+      Number(b.badges.matched) - Number(a.badges.matched) ||
+      Number(b.badges.arabicTeam) - Number(a.badges.arabicTeam) ||
+      Number(b.badges.styled) - Number(a.badges.styled) ||
+      a.originalIndex - b.originalIndex
+    )
+    .map(({ candidate }) => candidate);
 }
 
 function selectDiverseCandidates(candidates, limit) {
@@ -306,7 +381,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
             ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
           ];
-        const selected = config.resultMode === "best" ? eligible.slice(0, 1) : selectDiverseCandidates(eligible, config.maxResults);
+        const displayRanked = sortForDisplay(eligible);
+        const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
+        const selected = sortForDisplay(diverse);
         const subtitles = selected.map((candidate, index) => {
           const extension = extensionOf(candidate);
           const fallback = fallbackCandidates(eligible, candidate, extension, config.downloadFallbacks);
@@ -331,7 +408,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             id: `arabic-syncrank-${stableId}`,
             url: `${baseUrl(request, config)}/subtitle/${token}.${extension}`,
             lang: "ara",
-            label: `${index + 1}${resultLabel(candidate) ? ` ${resultLabel(candidate)}` : ""}`
+            label: detailedResultLabel(candidate, index)
           };
         });
         logger.info("subtitle search completed", {

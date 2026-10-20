@@ -3,7 +3,7 @@
 ## رفع المشروع
 
 1. أنشئ مستودعًا جديدًا وفارغًا في GitHub.
-2. فك ضغط ملف `arabic-elite-subtitles-v3.5.0-final.zip`.
+2. فك ضغط ملف `arabic-elite-subtitles-v3.5.1-final.zip`.
 3. ارفع محتويات المجلد نفسها إلى جذر المستودع، بحيث يظهر `package.json` و`render.yaml` مباشرة.
 4. لا تنشئ ملف `.env` داخل GitHub ولا ترفع مفاتيح API. ملف `.gitignore` يمنعه تلقائيًا.
 

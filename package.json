@@ -1,6 +1,6 @@
 {
   "name": "arabic-elite-subs",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "private": true,
   "type": "module",
   "description": "Arabic Elite Subtitles addon for Stremio with up to 25 validated human Arabic subtitle results from multiple sources and text formats.",

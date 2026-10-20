@@ -1,5 +1,27 @@
 import { normalizeName, parseReleaseName, titlesLikelyMatch } from "./media.js";
 
+const ARABIC_FANSUB_TEAMS = [
+  ["3ASQ", /(?:^|[^a-z0-9])3asq(?:[^a-z0-9]|$)/i],
+  ["Memories", /(?:^|[^a-z0-9])memories(?:[- .]?fansub)?(?:[^a-z0-9]|$)/i],
+  ["ESPADAS", /(?:^|[^a-z0-9])espadas(?:[^a-z0-9]|$)/i],
+  ["DAC Subs", /(?:^|[^a-z0-9])dac[- .]?subs?(?:[^a-z0-9]|$)/i],
+  ["Asahi Fansubs", /(?:^|[^a-z0-9])asahi[- .]?fansubs?(?:[^a-z0-9]|$)/i],
+  ["Arabic Anime Team", /(?:^|[^a-z0-9])arabic[- .]?anime[- .]?team(?:[^a-z0-9]|$)/i],
+  ["Kaizen", /(?:^|[^a-z0-9])kaizen(?:[^a-z0-9]|$)/i],
+  ["Aboody Subs", /(?:^|[^a-z0-9])abo+dy[- .]?subs?(?:[^a-z0-9]|$)/i],
+  ["Al-Amri Fansubs", /(?:^|[^a-z0-9])al[- .]?amri[- .]?fansubs?(?:[^a-z0-9]|$)/i],
+  ["ALanime Fansub", /(?:^|[^a-z0-9])alanime[- .]?fansubs?(?:[^a-z0-9]|$)/i],
+  ["Mirai Subs", /(?:^|[^a-z0-9])mirai[- .]?(?:subs?|fansubs?)(?:[^a-z0-9]|$)/i]
+];
+
+export function arabicFansubTeam(candidate = {}) {
+  const value = `${candidate.fileName || ""} ${candidate.release || ""}`;
+  const matched = ARABIC_FANSUB_TEAMS.find(([, pattern]) => pattern.test(value));
+  if (matched) return matched[0];
+  if (candidate.provider === "miraianime") return "Mirai Fansubs";
+  return "";
+}
+
 function same(a, b) {
   return a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase();
 }
@@ -108,7 +130,7 @@ export function scoreCandidate(candidate, context, preferences = {}) {
     reasons.push("season-pack");
   }
   if (candidate.fromTrusted) qualityScore += 5;
-  if (/\b(?:3asq|espadas|memories(?:[- .]?fansub)?|dac[- .]?subs|mirai[- .]?subs|asahi[- .]?fansubs|arabic[- .]?anime[- .]?team|kaizen)\b/i.test(candidate.fileName || candidate.release || "")) {
+  if (arabicFansubTeam(candidate)) {
     qualityScore += 6;
     reasons.push("arabic-fansub");
   }
@@ -200,7 +222,7 @@ export function rankCandidates(candidates, context, preferences = {}) {
 
   const seen = new Set();
   return scored.filter((candidate) => {
-    const key = `${normalizeName(candidate.fileName || candidate.release)}:${candidate.fileSize || ""}`;
+    const key = normalizeName(candidate.fileName || candidate.release);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -208,7 +230,7 @@ export function rankCandidates(candidates, context, preferences = {}) {
 }
 
 export function resultLabel(candidate, options = {}) {
-  const matchedName = candidate.reasons?.some((reason) => ["exact-release", "strong-release-match"].includes(reason));
+  const matchedName = candidate.reasons?.some((reason) => ["exact-release", "strong-release-match", "same-title"].includes(reason));
   const exactMedia = candidate.reasons?.includes("exact-hash");
   return matchedName || exactMedia ? "💪👍" : "";
 }

@@ -61,7 +61,7 @@ function parseRows(html, context, title) {
 
 async function fetchPage(path) {
   const response = await fetch(`${BASE}${path}`, {
-    headers: { Accept: "text/html", "Accept-Language": "en-US,en;q=0.8,ar;q=0.7", "User-Agent": "Mozilla/5.0 ArabicEliteSubs/3.5.0" },
+    headers: { Accept: "text/html", "Accept-Language": "en-US,en;q=0.8,ar;q=0.7", "User-Agent": "Mozilla/5.0 ArabicEliteSubs/3.5.1" },
     signal: AbortSignal.timeout(9000)
   });
   if (response.status === 404) return "";
@@ -116,7 +116,7 @@ export class Subf2mProvider {
       || detail.match(/<a[^>]+href=["']([^"']+)["'][^>]+id=["']downloadButton["']/i)?.[1]);
     if (!downloadPath || !downloadPath.endsWith("/download")) throw new Error("Subf2m download link is missing");
     const response = await fetch(`${BASE}${downloadPath}`, {
-      headers: { Referer: `${BASE}${path}`, "User-Agent": "Mozilla/5.0 ArabicEliteSubs/3.5.0" },
+      headers: { Referer: `${BASE}${path}`, "User-Agent": "Mozilla/5.0 ArabicEliteSubs/3.5.1" },
       redirect: "follow",
       signal: AbortSignal.timeout(20000)
     });

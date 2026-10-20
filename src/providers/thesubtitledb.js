@@ -23,7 +23,7 @@ export class TheSubtitleDbProvider {
     }
     const params = new URLSearchParams({ lang: "ar", limit: "100" });
     const response = await fetch(`${this.config.baseUrl}${path}?${params}`, {
-      headers: { Accept: "application/json", "User-Agent": "ArabicEliteSubs/3.5.0" },
+      headers: { Accept: "application/json", "User-Agent": "ArabicEliteSubs/3.5.1" },
       signal: AbortSignal.timeout(9000)
     });
     if (response.status === 404) return [];
@@ -66,7 +66,7 @@ export class TheSubtitleDbProvider {
     const id = safeSubtitleId(ref);
     if (!id) throw new Error("Invalid TheSubtitleDB subtitle id");
     const response = await fetch(`https://${API_HOST}/get/${id}`, {
-      headers: { Accept: "text/plain,application/octet-stream,*/*", "User-Agent": "ArabicEliteSubs/3.5.0" },
+      headers: { Accept: "text/plain,application/octet-stream,*/*", "User-Agent": "ArabicEliteSubs/3.5.1" },
       redirect: "follow",
       signal: AbortSignal.timeout(18000)
     });

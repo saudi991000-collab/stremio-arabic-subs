@@ -56,6 +56,18 @@ test("finds matching Arabic subtitles in the Mora archive without unrelated titl
   });
 });
 
+test("does not confuse a short partial Mora title with a longer movie title", async () => {
+  const movie = { media: { type: "movie", releaseTitle: "Spider Man No Way Home" }, extra: { filename: "Spider.Man.No.Way.Home.2021.mkv" } };
+  await withMockFetch(async () => new Response(JSON.stringify({ files: [
+    { name: "No.Man.of.God.2021.1080p.bluray.mora.25r.srt", size: "1200" },
+    { name: "Home.Team.2022.1080p.WEBRip.mora.25r.srt", size: "1200" },
+    { name: "Spider.Man.No.Way.Home.2021.1080p.BluRay.srt", size: "1200" }
+  ] }), { status: 200 }), async () => {
+    const results = await new MoraProvider().search(movie);
+    assert.deepEqual(results.map((item) => item.fileName), ["Spider.Man.No.Way.Home.2021.1080p.BluRay.srt"]);
+  });
+});
+
 test("parses exact Arabic episode releases from a Subf2m season page", async () => {
   await withMockFetch(async () => new Response(`<ul><li class="item"><a class="download" href="/subtitles/code-geass-first-season/arabic/777"></a><ul class="scrolllist"><li>Code.Geass.S01E07.ESPADAS.WEB-DL</li><li>Code.Geass.S01E08.ESPADAS.WEB-DL</li></ul><span class="rate good"></span></li></ul>`, { status: 200 }), async () => {
     const results = await new Subf2mProvider().search(context);

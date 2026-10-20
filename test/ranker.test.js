@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rankCandidates, resultLabel } from "../src/ranker.js";
+import { arabicFansubTeam, rankCandidates, resultLabel } from "../src/ranker.js";
 
 const context = {
   media: { type: "series", id: "tt1234567:2:6", imdbId: "1234567", season: 2, episode: 6 },
@@ -108,6 +108,17 @@ test("shows the compact emoji only for a strong release-name match", () => {
   assert.equal(label, "💪👍");
   assert.doesNotMatch(label, /\d+%/);
   assert.doesNotMatch(label, /SRT|ASS|OpenSubtitles|Anime/);
+});
+
+test("recognizes known Arabic fansub release groups", () => {
+  assert.equal(arabicFansubTeam({ fileName: "[3ASQ] Anime.S01E08.ass" }), "3ASQ");
+  assert.equal(arabicFansubTeam({ fileName: "[Memories] Code.Geass.08.BD.ass" }), "Memories");
+  assert.equal(arabicFansubTeam({ fileName: "Official.Netflix.Arabic.srt" }), "");
+  assert.equal(arabicFansubTeam({ provider: "miraianime", fileName: "Anime.S01E08.ass" }), "Mirai Fansubs");
+});
+
+test("marks every title-matching result, not only an exact release", () => {
+  assert.equal(resultLabel({ reasons: ["same-title"], fileName: "Movie.Other.Release.srt" }), "💪👍");
 });
 
 test("uses calibrated confidence before popularity inside the same tier", () => {

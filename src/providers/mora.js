@@ -1,4 +1,4 @@
-import { parseReleaseName, titleSimilarity } from "../media.js";
+import { parseReleaseName, titleSimilarity, titleTokens } from "../media.js";
 
 const IDENTIFIER = "mora25r";
 const BASE = `https://archive.org/download/${IDENTIFIER}`;
@@ -27,7 +27,7 @@ export class MoraProvider {
   async files() {
     if (this.index && Date.now() < this.indexExpiresAt) return this.index;
     const response = await fetch(this.config.metadataUrl, {
-      headers: { Accept: "application/json", "User-Agent": "ArabicEliteSubs/3.5.0" },
+      headers: { Accept: "application/json", "User-Agent": "ArabicEliteSubs/3.5.1" },
       signal: AbortSignal.timeout(15000)
     });
     if (!response.ok) throw new Error(`Mora archive index failed with HTTP ${response.status}`);
@@ -41,11 +41,15 @@ export class MoraProvider {
     const wantedTitle = titleFor(context);
     if (!wantedTitle) return [];
     const wantedYear = parseReleaseName(context.extra.filename || "").year || Number(context.media.year) || undefined;
+    const wantedTokens = new Set(titleTokens(wantedTitle));
     const files = await this.files();
     return files.map((file) => {
       const parsed = parseReleaseName(file.name);
       const similarity = titleSimilarity(wantedTitle, file.name);
       if (similarity < 0.55) return null;
+      const candidateTokens = new Set(titleTokens(file.name));
+      const sharedWanted = [...wantedTokens].filter((token) => candidateTokens.has(token)).length;
+      if (wantedTokens.size >= 3 && sharedWanted / wantedTokens.size < 0.6) return null;
       if (wantedYear && parsed.year && Math.abs(wantedYear - parsed.year) > 1) return null;
       if (context.media.type === "series") {
         if (parsed.season !== Number(context.media.season) || parsed.episode !== Number(context.media.episode)) return null;
@@ -58,7 +62,7 @@ export class MoraProvider {
         release: file.name,
         language: "ar",
         hashMatch: false,
-        catalogMatch: true,
+        catalogMatch: false,
         episodeScoped: context.media.type === "series",
         rating: 2,
         downloadCount: 0,
@@ -80,7 +84,7 @@ export class MoraProvider {
     const name = safeName(ref);
     if (!name) throw new Error("Invalid Mora subtitle name");
     const response = await fetch(`${BASE}/${encodeURIComponent(name)}`, {
-      headers: { "User-Agent": "ArabicEliteSubs/3.5.0" },
+      headers: { "User-Agent": "ArabicEliteSubs/3.5.1" },
       redirect: "follow",
       signal: AbortSignal.timeout(18000)
     });
