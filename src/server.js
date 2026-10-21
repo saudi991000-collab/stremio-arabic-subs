@@ -702,7 +702,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         // A short client cache only for complete results; partial lists must
         // be re-requested so the improved list shows up on the next open.
         const cacheMaxAge = entry.complete ? 300 : 0;
-        return json(response, 200, { subtitles, cacheMaxAge }, { "Cache-Control": "no-store" });
+        // Counts only (no ids, keys or names): lets the owner see why a list
+        // is short without access to the hosting logs.
+        const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started}`;
+        return json(response, 200, { subtitles, cacheMaxAge }, { "Cache-Control": "no-store", "X-Listing-Status": status });
       }
 
       const proxyRoute = url.pathname.match(/^\/subtitle\/([A-Za-z0-9_.-]{1,12000})\.(srt|vtt|ass|ssa)$/i);
@@ -846,7 +849,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       if (/^\/subtitles\//.test(url?.pathname || "")) {
         // Never answer a listing with an error page; an empty list lets
         // Stremio retry later instead of showing a failure.
-        return json(response, 200, { subtitles: [], cacheMaxAge: 0 }, { "Cache-Control": "no-store" });
+        const reason = String(error?.message || "error").replace(/[^\w .:-]/g, " ").slice(0, 120);
+        return json(response, 200, { subtitles: [], cacheMaxAge: 0 }, { "Cache-Control": "no-store", "X-Listing-Status": `error;${reason};ms=${Date.now() - started}` });
       }
       const safeMessage = /token|extension|too long|too large|Only IMDb/i.test(error.message) ? error.message : "Request failed";
       return json(response, /missing|quota/i.test(error.message) ? 503 : 400, { error: safeMessage, requestId });
