@@ -163,6 +163,32 @@ test("collapses mirrored files across providers and drops length outliers", () =
   assert.deepEqual(kept.map((item) => item.fileId), [1, 3, 5]);
 });
 
+test("a fallback file is served in the format its URL promises", async () => {
+  // The first choice (SRT) fails; the only fallback is an ASS file. Stremio
+  // rejects ASS content behind an .srt URL, so it must be converted.
+  const provider = new MultiProvider([
+    { ...fakeProvider("broken", 1), async download() { throw new Error("quota reached"); } },
+    { ...fakeProvider("styled", 1, { names: () => "Show.S01E07.1080p.WEB-DL.styled.ass" }), async download() { return { buffer: Buffer.from(arabicAss(40)), fileName: "x.ass" }; } }
+  ]);
+  await withServer(provider, { VALIDATE_BEFORE_LISTING: "false", DEEP_ANALYSIS_CANDIDATES: "0" }, async (base) => {
+    const list = await listing(base);
+    const srt = list.subtitles.find((item) => item.url.endsWith(".srt"));
+    const response = await fetch(srt.url);
+    const body = await response.text();
+    assert.match(response.headers.get("content-type"), /subrip/);
+    assert.match(body, /^1\n\d\d:\d\d:\d\d,\d{3} --> /);
+    assert.doesNotMatch(body, /\[Script Info\]/);
+  });
+});
+
+test("hides a provider whose daily download quota is used up", async () => {
+  const limited = { ...fakeProvider("limited", 3), isQuotaExhausted: () => true };
+  const provider = new MultiProvider([limited, fakeProvider("ok", 2)]);
+  const result = await withServer(provider, {}, async (base) => listing(base));
+  assert.equal(result.subtitles.length, 2);
+  assert.ok(result.subtitles.every((item) => !item.label.includes("limited")));
+});
+
 test("retries rate-limited requests with backoff and pauses the limiter", async () => {
   let calls = 0;
   const limiter = new RateLimiter({ minIntervalMs: 0, concurrency: 1 });

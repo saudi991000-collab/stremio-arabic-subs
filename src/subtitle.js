@@ -269,6 +269,76 @@ export function assToSrt(text) {
   return `${cues.join("\n\n")}\n`;
 }
 
+function srtBlocks(text) {
+  const cues = [];
+  for (const block of String(text).replace(/\r/g, "").split(/\n\s*\n/)) {
+    const lines = block.split("\n");
+    const index = lines.findIndex((line) => line.includes("-->"));
+    if (index < 0) continue;
+    const timing = lines[index].match(/((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})/);
+    if (!timing) continue;
+    const start = parseFlexibleClock(timing[1]);
+    const end = parseFlexibleClock(timing[2]);
+    if (start == null || end == null) continue;
+    cues.push({ start, end, text: lines.slice(index + 1).join("\n").trim() });
+  }
+  return cues;
+}
+
+function assClock(seconds) {
+  const centiseconds = Math.round(Math.max(0, seconds) * 100);
+  const hours = Math.floor(centiseconds / 360000);
+  const minutes = Math.floor((centiseconds % 360000) / 6000);
+  const secs = Math.floor((centiseconds % 6000) / 100);
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}.${String(centiseconds % 100).padStart(2, "0")}`;
+}
+
+// Plain SRT wrapped as a minimal ASS script, used when a fallback SRT file is
+// served under an .ass/.ssa URL (players reject a format that does not match).
+export function srtToAss(text) {
+  const header = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,60,60,50,178\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n";
+  const events = srtBlocks(text).map((cue) => {
+    const body = cue.text
+      .replace(/<\/?i>/gi, (tag) => (tag[1] === "/" ? "{\\i0}" : "{\\i1}"))
+      .replace(/<\/?b>/gi, (tag) => (tag[1] === "/" ? "{\\b0}" : "{\\b1}"))
+      .replace(/<[^>]+>/g, "")
+      .replace(/\n/g, "\\N");
+    return `Dialogue: 0,${assClock(cue.start)},${assClock(cue.end)},Default,,0,0,0,,${body}`;
+  });
+  return `${header}${events.join("\n")}\n`;
+}
+
+export function srtToVtt(text) {
+  const vttClock = (value) => srtClock(value).replace(",", ".");
+  return `WEBVTT\n\n${srtBlocks(text).map((cue) => `${vttClock(cue.start)} --> ${vttClock(cue.end)}\n${cue.text}`).join("\n\n")}\n`;
+}
+
+export function detectTextFormat(text) {
+  const head = String(text).slice(0, 2048);
+  if (/^\s*﻿?\[Script Info\]/i.test(head) || /^Dialogue:/im.test(head)) return /ScriptType:\s*v4\.00\s*$/im.test(head) ? "ssa" : "ass";
+  if (/^\s*﻿?WEBVTT\b/i.test(head)) return "vtt";
+  return "srt";
+}
+
+/**
+ * Converts an already-normalized subtitle (SRT/VTT/ASS) to the format the
+ * subtitle URL promised. A file whose content does not match its URL
+ * extension makes Stremio fail with "Failed to load external subtitles".
+ */
+export function convertToFormat(buffer, target) {
+  const text = Buffer.from(buffer).toString("utf8");
+  const source = detectTextFormat(text);
+  const wanted = String(target || "srt").toLowerCase();
+  const assLike = (value) => value === "ass" || value === "ssa";
+  if (source === wanted || (assLike(source) && assLike(wanted))) return { buffer: Buffer.from(text, "utf8"), extension: wanted };
+  let srt = text;
+  if (assLike(source)) srt = assToSrt(text);
+  else if (source === "vtt") srt = vttToSrt(text);
+  if (wanted === "srt") return { buffer: Buffer.from(srt, "utf8"), extension: "srt" };
+  if (wanted === "vtt") return { buffer: Buffer.from(srtToVtt(srt), "utf8"), extension: "vtt" };
+  return { buffer: Buffer.from(srtToAss(srt), "utf8"), extension: wanted };
+}
+
 function srtClock(seconds) {
   const milliseconds = Math.round(Math.max(0, Number(seconds) || 0) * 1000);
   const hours = Math.floor(milliseconds / 3_600_000);

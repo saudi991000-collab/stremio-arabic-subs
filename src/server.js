@@ -10,7 +10,7 @@ import { parseExtra, parseReleaseName } from "./media.js";
 import { alignMediaToFilename, resolveVideoId } from "./id-resolver.js";
 import { arabicFansubTeam, rankCandidates, releaseMatched, resultLabel, stableKey } from "./ranker.js";
 import { signSubtitleToken, verifySubtitleToken } from "./token.js";
-import { normalizeSubtitle } from "./subtitle.js";
+import { convertToFormat, detectTextFormat, normalizeSubtitle } from "./subtitle.js";
 import { Cache } from "./cache.js";
 import { JsonStore, UpstashKv, deepFreeze, mergeSearchEntries } from "./store.js";
 import { assessSubtitle } from "./quality.js";
@@ -630,7 +630,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         }
         if (ranked.some((candidate) => !candidate.deepAnalyzed)) scheduleValidation(key, entry, context);
         const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
-        const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed), companionSession?.duration);
+        // A provider whose daily download quota is used up cannot deliver
+        // its files; listing them only produces "Failed to load" in Stremio.
+        const unavailable = (candidate) => Boolean(actualProvider.byId?.get(candidate.provider)?.isQuotaExhausted?.());
+        const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed && !unavailable(candidate)), companionSession?.duration);
         const eligible = requireVerifiedDownload
           ? [
             ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
@@ -741,8 +744,16 @@ export async function createAddonServer({ config = readConfig(), provider, cache
               await actualCache.setFile(key, normalizedBuffer);
               logger.info("subtitle normalized", { requestId, provider: item.provider, encoding: normalized.encoding, cueCount: normalized.analysis.cueCount });
             } else {
-              extension = /^\s*﻿?\[Script Info\]/i.test(normalizedBuffer.subarray(0, 64).toString("utf8")) ? (extension === "ssa" ? "ssa" : "ass")
-                : /^\s*﻿?WEBVTT/i.test(normalizedBuffer.subarray(0, 16).toString("utf8")) ? "vtt" : extension === "ass" || extension === "ssa" || extension === "vtt" ? "srt" : extension;
+              // Cached files keep their real format; read it from the content.
+              extension = detectTextFormat(normalizedBuffer.subarray(0, 4096).toString("utf8"));
+            }
+            // The URL promised payload.extension. A fallback (or a cached
+            // file) in another format must be converted, or Stremio rejects
+            // it with "Failed to load external subtitles".
+            if (extension !== payload.extension) {
+              const converted = convertToFormat(normalizedBuffer, payload.extension);
+              normalizedBuffer = converted.buffer;
+              extension = converted.extension;
             }
             let transform = item.transform;
             if (!transform && payload.context && !item.reasons?.includes("exact-hash")) {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { gzipSync, deflateRawSync } from "node:zlib";
-import { extractArchive, normalizeSubtitle, safeArchiveEntryName, decodeArabic } from "../src/subtitle.js";
+import { convertToFormat, extractArchive, normalizeSubtitle, safeArchiveEntryName, decodeArabic } from "../src/subtitle.js";
 import { arabicAss, arabicSrt, englishSrt, zipStore } from "./fixtures.js";
 
 test("selects the requested episode from a multi-file season ZIP", () => {
@@ -83,6 +83,19 @@ test("decodes gzip, UTF-16 and Windows-1256 Arabic subtitles", () => {
   const decoded = decodeArabic(body);
   assert.equal(decoded.encoding, "windows-1256");
   assert.match(decoded.text, /مرحبا/);
+});
+
+test("converts between SRT, VTT and ASS for the requested URL format", () => {
+  const srt = arabicSrt(10);
+  const ass = convertToFormat(Buffer.from(srt), "ass");
+  assert.equal(ass.extension, "ass");
+  assert.match(ass.buffer.toString("utf8"), /^\[Script Info\][\s\S]*Dialogue: 0,0:00:/);
+  const vtt = convertToFormat(Buffer.from(srt), "vtt");
+  assert.match(vtt.buffer.toString("utf8"), /^WEBVTT\n\n\d\d:\d\d:\d\d\.\d{3} --> /);
+  const back = convertToFormat(Buffer.from(arabicAss(10)), "srt");
+  assert.equal(back.extension, "srt");
+  assert.match(back.buffer.toString("utf8"), /^1\n00:00:/);
+  assert.equal(convertToFormat(Buffer.from(arabicAss(10)), "ass").buffer.toString("utf8"), arabicAss(10));
 });
 
 test("detects the real format from content rather than the extension", () => {

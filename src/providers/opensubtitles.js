@@ -246,7 +246,16 @@ export class OpenSubtitlesProvider {
       : null;
   }
 
+  // True while the daily download quota is used up. Listings hide this
+  // provider's results meanwhile, because every download would fail.
+  isQuotaExhausted() {
+    return Date.now() < (this.quotaUntil || 0);
+  }
+
   async getDownloadLink(fileId, signal) {
+    if (this.isQuotaExhausted()) {
+      throw new HttpError("OpenSubtitles download or request quota has been reached", { status: 406, rateLimited: true });
+    }
     // Authenticate before the first download whenever account credentials are
     // configured. Waiting for a 401 kept paid/VIP accounts on the anonymous
     // quota because quota exhaustion is normally reported as 429 instead.
@@ -266,11 +275,22 @@ export class OpenSubtitlesProvider {
         await this.login();
         response = await perform();
       } else {
+        if (error?.rateLimited) {
+          // OpenSubtitles resets quotas at 00:00 UTC. Pause until then (at
+          // most 24 h), then try again.
+          const now = new Date();
+          const nextReset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+          this.quotaUntil = Math.min(nextReset, Date.now() + 24 * 3600 * 1000);
+        }
         throw error;
       }
     }
     const payload = response.json();
     if (!payload?.link) throw new Error("Provider returned no download URL");
+    if (Number(payload.remaining) <= 0) {
+      const now = new Date();
+      this.quotaUntil = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+    }
     return { url: payload.link, fileName: payload.file_name || "subtitle.srt" };
   }
 
