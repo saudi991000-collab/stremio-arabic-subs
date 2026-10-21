@@ -29,12 +29,14 @@ test("falls back to the ARM mapping when the Kitsu add-on is unreachable", async
   const fetchImpl = async (url) => {
     if (String(url).includes("anime-kitsu")) throw new Error("connect timeout");
     if (String(url).includes("arm.haglund.dev")) return { ok: true, json: async () => ({ kitsu: 46299, imdb: "tt21423786", "thetvdb-season": 1 }) };
+    if (String(url).includes("api.ani.zip")) return { ok: true, json: async () => ({ titles: { "x-jat": "Boku no Kokoro no Yabai Yatsu", en: "The Dangers in My Heart" } }) };
     throw new Error(`unexpected ${url}`);
   };
   const media = await resolveVideoId("series", "kitsu:46299:3", { fetchImpl });
   assert.equal(media.id, "tt21423786:1:3");
   assert.equal(media.imdbId, "21423786");
   assert.equal(media.episode, 3);
+  assert.equal(media.title, "Boku no Kokoro no Yabai Yatsu");
   assert.equal(identityUnresolved(media), false);
   const unknown = await resolveVideoId("series", "kitsu:99999999:1", { fetchImpl: async () => { throw new Error("down"); } });
   assert.equal(identityUnresolved(unknown), true);

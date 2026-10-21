@@ -121,6 +121,18 @@ async function resolveKitsuWithArm(type, id, fetchImpl) {
   };
 }
 
+async function kitsuRomajiTitle(id, fetchImpl) {
+  const kitsuId = String(id).match(/^kitsu:(\d+)/i)?.[1];
+  if (!kitsuId) return "";
+  const response = await fetchImpl(`https://api.ani.zip/mappings?kitsu_id=${kitsuId}`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(3500)
+  });
+  if (!response.ok) return "";
+  const titles = (await response.json())?.titles || {};
+  return String(titles["x-jat"] || titles.en || "").slice(0, 200);
+}
+
 export async function resolveVideoId(type, id, options = {}) {
   if (/^tt\d+(?::\d+:\d+)?$/i.test(String(id))) return parseVideoId(type, id);
   const key = `${type}:${id}`;
@@ -137,6 +149,12 @@ export async function resolveVideoId(type, id, options = {}) {
     if (!value?.imdbId) {
       const fallback = await resolveKitsuWithArm(type, id, fetchImpl).catch(() => null);
       if (fallback) value = { ...fallback, title: value?.title || fallback.title };
+    }
+    // ARM returns ids only. Anime subtitles are named by the romaji title, so
+    // fetch it (ani.zip) when the Kitsu add-on could not provide it.
+    if (value?.imdbId && !value.title) {
+      const title = await kitsuRomajiTitle(id, fetchImpl).catch(() => "");
+      if (title) value = { ...value, title };
     }
     value ||= genericVideoId(type, id);
   } else {
