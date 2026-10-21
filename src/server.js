@@ -13,6 +13,7 @@ import { signSubtitleToken, verifySubtitleToken } from "./token.js";
 import { convertToFormat, detectTextFormat, normalizeSubtitle } from "./subtitle.js";
 import { Cache } from "./cache.js";
 import { JsonStore, UpstashKv, deepFreeze, mergeSearchEntries } from "./store.js";
+import { runInBackground } from "./http.js";
 import { assessSubtitle } from "./quality.js";
 import { OpenSubtitlesProvider } from "./providers/opensubtitles.js";
 import { OpenSubtitlesOrgProvider } from "./providers/opensubtitles-org.js";
@@ -463,7 +464,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     if (Date.now() - (lastRefreshAt.get(key) || 0) < 60000) return null;
     lastRefreshAt.set(key, Date.now());
     if (lastRefreshAt.size > 5000) lastRefreshAt.delete(lastRefreshAt.keys().next().value);
-    const work = track(runSearch(key, context, config.providerHardTimeoutMs).then((entry) => {
+    const work = track(runInBackground(() => runSearch(key, context, config.providerHardTimeoutMs)).then((entry) => {
       logger.info("background search refresh finished", { candidates: entry.candidates.length, complete: entry.complete });
       scheduleValidation(key, entry, context);
     }).finally(() => refreshes.delete(key)));
@@ -476,11 +477,11 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   function scheduleValidation(key, entry, context) {
     if (!config.backgroundValidation || !entry?.candidates?.length || typeof actualProvider.download !== "function") return null;
     if (validations.has(key)) return validations.get(key);
-    const work = track((async () => {
+    const work = track(runInBackground(async () => {
       const ranked = rankCandidates(entry.candidates, context, config)
         .filter((candidate) => candidate.confidence >= Math.max(45, config.minConfidence - 25) && !candidate.reasons?.includes("season-pack"));
       await deepAnalyzeCandidates(ranked, context, actualProvider, actualCache, {
-        limit: Math.min(60, ranked.length),
+        limit: Math.min(30, ranked.length),
         timeoutMs: config.backgroundValidationTimeoutMs,
         verdicts: verdictStore,
         preferences,
@@ -489,7 +490,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         concurrency: 4,
         maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
       });
-    })().finally(() => validations.delete(key)));
+    }).finally(() => validations.delete(key)));
     validations.set(key, work);
     return work;
   }

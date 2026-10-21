@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { USER_AGENT } from "./version.js";
@@ -86,16 +87,31 @@ export function backoffDelay(attempt, { baseMs = 400, maxMs = 4000, random = Mat
   return Math.round(exponential / 2 + random() * exponential / 2);
 }
 
+// Work started from background jobs (validation, refresh) runs inside this
+// context and is queued behind everything a user is waiting for.
+export const backgroundContext = new AsyncLocalStorage();
+
+export function runInBackground(task) {
+  return backgroundContext.run({ background: true }, task);
+}
+
 // A tiny per-host limiter: at most `concurrency` requests in flight and at
 // least `minIntervalMs` between request starts. It is intentionally in-process;
 // Render runs a single instance of this add-on.
+//
+// Two queues: requests for a listing the user is waiting on always go first,
+// and background requests may never take the last free slot. Without this a
+// new video's search waited behind dozens of validation downloads from the
+// previous video and returned no results at all.
 export class RateLimiter {
   constructor({ minIntervalMs = 0, concurrency = 4 } = {}) {
     this.minIntervalMs = minIntervalMs;
     this.concurrency = concurrency;
     this.active = 0;
+    this.activeBackground = 0;
     this.lastStart = 0;
     this.queue = [];
+    this.backgroundQueue = [];
     this.blockedUntil = 0;
   }
 
@@ -104,13 +120,15 @@ export class RateLimiter {
   }
 
   async run(task, signal) {
+    const background = Boolean(backgroundContext.getStore()?.background);
+    const queue = background ? this.backgroundQueue : this.queue;
     await new Promise((resolve, reject) => {
-      const entry = { resolve, reject };
-      this.queue.push(entry);
+      const entry = { resolve, reject, background };
+      queue.push(entry);
       signal?.addEventListener("abort", () => {
-        const index = this.queue.indexOf(entry);
+        const index = queue.indexOf(entry);
         if (index >= 0) {
-          this.queue.splice(index, 1);
+          queue.splice(index, 1);
           reject(signal.reason || new Error("aborted"));
         }
       }, { once: true });
@@ -120,12 +138,22 @@ export class RateLimiter {
       return await task();
     } finally {
       this.active -= 1;
+      if (background) this.activeBackground -= 1;
       this.#drain();
     }
   }
 
+  #next() {
+    if (this.queue.length) return this.queue;
+    const backgroundLimit = Math.max(1, this.concurrency - 1);
+    if (this.backgroundQueue.length && this.activeBackground < backgroundLimit) return this.backgroundQueue;
+    return null;
+  }
+
   #drain() {
-    if (!this.queue.length || this.active >= this.concurrency) return;
+    if (this.active >= this.concurrency) return;
+    const queue = this.#next();
+    if (!queue) return;
     const wait = Math.max(this.lastStart + this.minIntervalMs, this.blockedUntil) - Date.now();
     if (wait > 0) {
       // Not unref'd: a queued request must keep the process alive.
@@ -133,8 +161,9 @@ export class RateLimiter {
       this.timer = setTimeout(() => this.#drain(), wait);
       return;
     }
-    const next = this.queue.shift();
+    const next = queue.shift();
     this.active += 1;
+    if (next.background) this.activeBackground += 1;
     this.lastStart = Date.now();
     next.resolve();
     this.#drain();

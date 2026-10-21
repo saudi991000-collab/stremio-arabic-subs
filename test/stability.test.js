@@ -7,7 +7,7 @@ import { createAddonServer, dropDuplicatesAndOutliers } from "../src/server.js";
 import { readConfig } from "../src/config.js";
 import { MultiProvider } from "../src/providers/multi.js";
 import { JsonStore, mergeSearchEntries } from "../src/store.js";
-import { safeFetch, RateLimiter } from "../src/http.js";
+import { safeFetch, RateLimiter, runInBackground } from "../src/http.js";
 import { arabicAss, arabicSrt } from "./fixtures.js";
 
 const LINES = (id) => [`هذه الترجمة رقم ${id} وهي ترجمة بشرية حقيقية.`, `سطر آخر مختلف في الترجمة رقم ${id}، أليس كذلك؟`, `نهاية المشهد في الترجمة ${id}.`];
@@ -188,6 +188,20 @@ test("hides a provider whose daily download quota is used up", async () => {
   const result = await withServer(provider, {}, async (base) => listing(base));
   assert.equal(result.subtitles.length, 2);
   assert.ok(result.subtitles.every((item) => !item.label.includes("limited")));
+});
+
+test("a user's search never waits behind background downloads", async () => {
+  const limiter = new RateLimiter({ minIntervalMs: 0, concurrency: 2 });
+  const order = [];
+  const slow = (name) => () => new Promise((resolve) => setTimeout(() => { order.push(name); resolve(); }, 150));
+  // Ten queued background downloads, then one search the user is waiting on.
+  const background = Array.from({ length: 10 }, (_, index) => runInBackground(() => limiter.run(slow(`bg${index}`))));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const started = Date.now();
+  await limiter.run(slow("search"));
+  assert.ok(Date.now() - started < 400, `search waited ${Date.now() - started} ms`);
+  assert.ok(order.indexOf("search") <= 1, `search finished at position ${order.indexOf("search")}`);
+  await Promise.all(background);
 });
 
 test("retries rate-limited requests with backoff and pauses the limiter", async () => {
