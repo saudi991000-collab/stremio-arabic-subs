@@ -48,7 +48,7 @@ async function resolveKitsu(type, id, fetchImpl) {
   const episodeHint = Number(match[3] || match[2]) || undefined;
   const response = await fetchImpl(`${KITSU_META_BASE}/meta/${type}/kitsu:${kitsuId}.json`, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(4000)
+    signal: AbortSignal.timeout(3000)
   });
   if (!response.ok) throw new Error(`Kitsu metadata failed with HTTP ${response.status}`);
   const payload = await response.json();
@@ -98,7 +98,7 @@ async function resolveKitsuWithArm(type, id, fetchImpl) {
   if (!match) return null;
   const response = await fetchImpl(`https://arm.haglund.dev/api/v2/ids?source=kitsu&id=${match[1]}`, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(4000)
+    signal: AbortSignal.timeout(3000)
   });
   if (!response.ok) return null;
   const row = await response.json();
@@ -121,16 +121,20 @@ async function resolveKitsuWithArm(type, id, fetchImpl) {
   };
 }
 
-async function kitsuRomajiTitle(id, fetchImpl) {
+// Romaji and English titles straight from the Kitsu API. Anime subtitles are
+// usually named by the romaji title, so both are used for matching.
+async function kitsuTitles(id, fetchImpl) {
   const kitsuId = String(id).match(/^kitsu:(\d+)/i)?.[1];
-  if (!kitsuId) return "";
-  const response = await fetchImpl(`https://api.ani.zip/mappings?kitsu_id=${kitsuId}`, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(3500)
+  if (!kitsuId) return {};
+  const response = await fetchImpl(`https://kitsu.app/api/edge/anime/${kitsuId}`, {
+    headers: { Accept: "application/vnd.api+json" },
+    signal: AbortSignal.timeout(3000)
   });
-  if (!response.ok) return "";
-  const titles = (await response.json())?.titles || {};
-  return String(titles["x-jat"] || titles.en || "").slice(0, 200);
+  if (!response.ok) return {};
+  const attributes = (await response.json())?.data?.attributes || {};
+  const romaji = String(attributes.titles?.en_jp || attributes.canonicalTitle || "").slice(0, 200);
+  const english = String(attributes.titles?.en || "").slice(0, 200);
+  return { romaji, english: english !== romaji ? english : "" };
 }
 
 export async function resolveVideoId(type, id, options = {}) {
@@ -141,22 +145,24 @@ export async function resolveVideoId(type, id, options = {}) {
   let value;
   const fetchImpl = options.fetchImpl || fetch;
   if (/^kitsu:/i.test(String(id))) {
-    try {
-      value = await resolveKitsu(type, id, fetchImpl);
-    } catch {
-      value = null;
-    }
-    if (!value?.imdbId) {
-      const fallback = await resolveKitsuWithArm(type, id, fetchImpl).catch(() => null);
-      if (fallback) value = { ...fallback, title: value?.title || fallback.title };
-    }
-    // ARM returns ids only. Anime subtitles are named by the romaji title, so
-    // fetch it (ani.zip) when the Kitsu add-on could not provide it.
-    if (value?.imdbId && !value.title) {
-      const title = await kitsuRomajiTitle(id, fetchImpl).catch(() => "");
-      if (title) value = { ...value, title };
-    }
-    value ||= genericVideoId(type, id);
+    // All three lookups run in parallel with short timeouts: waiting for one
+    // after another used most of the listing deadline on Render, leaving no
+    // time to search the subtitle providers.
+    const [addon, arm, titles] = await Promise.allSettled([
+      resolveKitsu(type, id, fetchImpl),
+      resolveKitsuWithArm(type, id, fetchImpl),
+      kitsuTitles(id, fetchImpl)
+    ]);
+    const fromAddon = addon.status === "fulfilled" ? addon.value : null;
+    const fromArm = arm.status === "fulfilled" ? arm.value : null;
+    const names = titles.status === "fulfilled" ? titles.value : {};
+    value = fromAddon?.imdbId ? fromAddon : fromArm || fromAddon || genericVideoId(type, id);
+    const romaji = names.romaji || value.title || "";
+    value = {
+      ...value,
+      ...(romaji ? { title: romaji } : {}),
+      ...(names.english && !value.catalogTitle ? { catalogTitle: names.english } : {})
+    };
   } else {
     value = genericVideoId(type, id);
   }
