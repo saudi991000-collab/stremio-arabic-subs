@@ -109,7 +109,11 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   const labelledMachine = explicitMachineLabel(candidate.fileName, candidate.release, candidate.comment);
   if ((candidate.machineTranslated || candidate.aiTranslated || labelledMachine) && !preferences.allowMachineTranslated) return null;
   const candidateName = candidate.fileName || candidate.release || "";
-  const titleMatch = Boolean(wanted.title && actual.title && titlesLikelyMatch(context.extra.filename, candidateName));
+  // Without a filename (common for debrid/HTTP streams) match against the
+  // catalogue titles instead: Kitsu's romaji title and Cinemeta's English one.
+  const titleReferences = [context.extra.filename, context.media.title, context.media.catalogTitle, context.media.releaseTitle]
+    .filter((value) => value && titleTokens(value).length);
+  const titleMatch = Boolean(actual.title && titleReferences.some((reference) => titlesLikelyMatch(reference, candidateName)));
   if (!context.media.imdbId && wanted.title && actual.title && !titleMatch) return null;
   // Extras and unrelated media filed under the same id: game playthroughs,
   // trailers, featurettes, "making of"...
@@ -120,9 +124,12 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   // Coverage is checked in both directions: "Blood-C: The Last Dark" or "The
   // Last Days of Ptolemy Grey" share one word with "The Last of Us" but cover
   // neither title well enough to be the same work.
-  if (!candidate.hashMatch && actual.title && (actual.season != null || actual.year || actual.absoluteEpisode != null) && titleTokens(candidateName).length) {
-    const known = [context.extra.filename, context.media.catalogTitle, context.media.title, context.media.releaseTitle].filter(Boolean);
-    if (known.length && known.every((name) => titleCoverage(name, candidateName) < 0.6)) return null;
+  // One English catalogue title alone is not enough to reject: anime files
+  // are usually named by their romaji title ("Boku no Kokoro no Yabai Yatsu"
+  // for "The Dangers in My Heart").
+  const enoughTitles = Boolean(context.extra.filename) || titleReferences.length >= 2;
+  if (enoughTitles && !candidate.hashMatch && actual.title && (actual.season != null || actual.year || actual.absoluteEpisode != null) && titleTokens(candidateName).length) {
+    if (titleReferences.length && titleReferences.every((name) => titleCoverage(name, candidateName) < 0.6)) return null;
   }
 
   let syncScore = 0;

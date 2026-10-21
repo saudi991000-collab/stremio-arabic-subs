@@ -48,7 +48,7 @@ async function resolveKitsu(type, id, fetchImpl) {
   const episodeHint = Number(match[3] || match[2]) || undefined;
   const response = await fetchImpl(`${KITSU_META_BASE}/meta/${type}/kitsu:${kitsuId}.json`, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(5000)
+    signal: AbortSignal.timeout(4000)
   });
   if (!response.ok) throw new Error(`Kitsu metadata failed with HTTP ${response.status}`);
   const payload = await response.json();
@@ -91,23 +91,67 @@ export function absoluteEpisodeFromVideos(videos, season, episode) {
   return index >= 0 ? index + 1 : undefined;
 }
 
+// Fallback when the Kitsu add-on is unreachable (it does not always answer
+// requests from cloud hosts): ARM maps a Kitsu id to IMDb and the TVDB season.
+async function resolveKitsuWithArm(type, id, fetchImpl) {
+  const match = String(id).match(/^kitsu:(\d+)(?::(\d+))?(?::(\d+))?$/i);
+  if (!match) return null;
+  const response = await fetchImpl(`https://arm.haglund.dev/api/v2/ids?source=kitsu&id=${match[1]}`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(4000)
+  });
+  if (!response.ok) return null;
+  const row = await response.json();
+  const imdbId = asImdbId(row?.imdb);
+  if (!imdbId) return null;
+  if (type === "movie") return { type, id: `tt${imdbId}`, sourceId: String(id), imdbId, title: "" };
+  const episode = Number(match[3] || match[2]);
+  const season = Number(row["thetvdb-season"] ?? row["themoviedb-season"] ?? 1) || 1;
+  if (!Number.isInteger(episode)) return null;
+  return {
+    type,
+    id: `tt${imdbId}:${season}:${episode}`,
+    sourceId: String(id),
+    imdbId,
+    season,
+    episode,
+    absoluteEpisode: episode,
+    title: "",
+    mappedBy: "arm"
+  };
+}
+
 export async function resolveVideoId(type, id, options = {}) {
   if (/^tt\d+(?::\d+:\d+)?$/i.test(String(id))) return parseVideoId(type, id);
   const key = `${type}:${id}`;
   const cached = cache.get(key);
-  if (cached && Date.now() - cached.at < 24 * 60 * 60 * 1000) return cached.value;
+  if (cached && Date.now() - cached.at < (cached.value.imdbId ? 24 * 60 * 60 * 1000 : 5 * 60 * 1000)) return cached.value;
   let value;
+  const fetchImpl = options.fetchImpl || fetch;
   if (/^kitsu:/i.test(String(id))) {
     try {
-      value = await resolveKitsu(type, id, options.fetchImpl || fetch);
+      value = await resolveKitsu(type, id, fetchImpl);
     } catch {
-      value = genericVideoId(type, id);
+      value = null;
     }
+    if (!value?.imdbId) {
+      const fallback = await resolveKitsuWithArm(type, id, fetchImpl).catch(() => null);
+      if (fallback) value = { ...fallback, title: value?.title || fallback.title };
+    }
+    value ||= genericVideoId(type, id);
   } else {
     value = genericVideoId(type, id);
   }
+  // An unresolved identity is retried soon instead of being trusted for a day.
   cache.set(key, { at: Date.now(), value });
   return value;
+}
+
+// True when the request names a catalogue (Kitsu) whose IMDb identity could
+// not be determined; searching then returns nothing and must never be cached
+// as a complete result.
+export function identityUnresolved(media) {
+  return /^kitsu:/i.test(String(media?.sourceId || media?.id || "")) && !media?.imdbId;
 }
 
 async function cinemeta(imdbId, type, fetchImpl) {
@@ -143,7 +187,18 @@ async function findCinemetaByTitle(type, title, fetchImpl) {
 }
 
 export async function alignMediaToFilename(media, extra, options = {}) {
-  if (!extra?.filename) return media;
+  if (!extra?.filename) {
+    // Stremio often sends no filename (debrid/HTTP streams). Still learn the
+    // catalogue title and absolute episode so subtitles can be matched by
+    // title instead of being ranked blind.
+    if (!media.imdbId || (media.catalogTitle && media.absoluteEpisode != null)) return media;
+    const meta = await cinemeta(media.imdbId, media.type, options.fetchImpl || fetch).catch(() => null);
+    if (!meta) return media;
+    const absolute = media.type === "series" && media.absoluteEpisode == null
+      ? absoluteEpisodeFromVideos(meta.videos, media.season, media.episode)
+      : undefined;
+    return { ...media, catalogTitle: meta.name || media.catalogTitle || "", ...(absolute ? { absoluteEpisode: absolute } : {}) };
+  }
   const parsed = parseReleaseName(extra.filename);
   let aligned = { ...media, releaseTitle: parsed.title };
   if (media.type === "series" && Number.isInteger(parsed.episode) && parsed.episode !== media.episode) {

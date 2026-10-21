@@ -55,6 +55,19 @@ test("keeps one copy of a file mirrored by the OpenSubtitles family", () => {
   assert.deepEqual(ranked.map((item) => item.provider).sort(), ["opensubtitles-org", "subsource"]);
 });
 
+test("anime without a filename matches the romaji and English catalogue titles", () => {
+  const context = { media: { type: "series", imdbId: "21423786", season: 1, episode: 1, absoluteEpisode: 1, title: "Boku no Kokoro no Yabai Yatsu", catalogTitle: "The Dangers in My Heart" }, extra: { filename: "" } };
+  const scoped = { featureDetails: { seasonNumber: 1, episodeNumber: 1 } };
+  const romaji = scoreCandidate({ fileId: 1, fileName: "[Aiz-san Sub] Boku no Kokoro no Yabai Yatsu - 01.ass", ...scoped }, context);
+  assert.ok(romaji && releaseMatched(romaji));
+  const english = scoreCandidate({ fileId: 2, fileName: "The.Dangers.in.My.Heart.S01E01.1080p.WEB.srt", ...scoped }, context);
+  assert.ok(english && releaseMatched(english));
+  assert.equal(scoreCandidate({ fileId: 3, fileName: "Spy.x.Family.S01E01.1080p.srt", ...scoped }, context), null);
+  // With only the English title known, romaji-named files are kept (not rejected).
+  const englishOnly = { ...context, media: { ...context.media, title: undefined } };
+  assert.ok(scoreCandidate({ fileId: 4, fileName: "[Aiz-san Sub] Boku no Kokoro no Yabai Yatsu - 01.ass", ...scoped }, englishOnly));
+});
+
 test("TV: season packs never receive the release-match badge", () => {
   const context = series("Show.S01E03.1080p.WEB-DL.mkv", 1, 3);
   const pack = scoreCandidate({ fileId: 1, fileName: "Show.S01.Complete.1080p.WEB-DL.srt" }, context);

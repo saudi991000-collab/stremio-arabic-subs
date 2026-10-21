@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { alignMediaToFilename, resolveVideoId } from "../src/id-resolver.js";
+import { alignMediaToFilename, identityUnresolved, resolveVideoId } from "../src/id-resolver.js";
 
 test("keeps normal IMDb episode ids unchanged", async () => {
   const media = await resolveVideoId("series", "tt2560140:1:1");
@@ -23,6 +23,21 @@ test("maps a Kitsu episode to its IMDb season and episode", async () => {
   assert.equal(media.imdbId, "2560140");
   assert.equal(media.season, 1);
   assert.equal(media.episode, 1);
+});
+
+test("falls back to the ARM mapping when the Kitsu add-on is unreachable", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).includes("anime-kitsu")) throw new Error("connect timeout");
+    if (String(url).includes("arm.haglund.dev")) return { ok: true, json: async () => ({ kitsu: 46299, imdb: "tt21423786", "thetvdb-season": 1 }) };
+    throw new Error(`unexpected ${url}`);
+  };
+  const media = await resolveVideoId("series", "kitsu:46299:3", { fetchImpl });
+  assert.equal(media.id, "tt21423786:1:3");
+  assert.equal(media.imdbId, "21423786");
+  assert.equal(media.episode, 3);
+  assert.equal(identityUnresolved(media), false);
+  const unknown = await resolveVideoId("series", "kitsu:99999999:1", { fetchImpl: async () => { throw new Error("down"); } });
+  assert.equal(identityUnresolved(unknown), true);
 });
 
 test("accepts unknown catalog ids without risking an unscoped IMDb search", async () => {

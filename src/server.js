@@ -7,7 +7,7 @@ import { readConfig } from "./config.js";
 import { logger } from "./logger.js";
 import { manifest } from "./manifest.js";
 import { parseExtra, parseReleaseName } from "./media.js";
-import { alignMediaToFilename, resolveVideoId } from "./id-resolver.js";
+import { alignMediaToFilename, identityUnresolved, resolveVideoId } from "./id-resolver.js";
 import { arabicFansubTeam, rankCandidates, releaseMatched, resultLabel, stableKey } from "./ranker.js";
 import { signSubtitleToken, verifySubtitleToken } from "./token.js";
 import { convertToFormat, detectTextFormat, normalizeSubtitle } from "./subtitle.js";
@@ -415,8 +415,11 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     const work = previousLock.then(async () => {
       const previous = await searchStore.get(key);
       const merged = mergeSearchEntries(previous, snapshot, expectedProviders);
-      const entry = deepFreeze({ ...merged, media: media || previous?.media });
-      await searchStore.set(key, entry);
+      const unresolved = identityUnresolved(media || previous?.media);
+      const entry = deepFreeze({ ...merged, complete: merged.complete && !unresolved, media: media || previous?.media });
+      // Without a known IMDb identity most providers return nothing; storing
+      // that as a result would hide every subtitle for hours.
+      if (!unresolved) await searchStore.set(key, entry);
       return entry;
     });
     const settled = work.catch(() => null);
@@ -573,6 +576,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const extra = parseExtra(decodeURIComponent(encodedExtra));
         const key = searchKey(type, videoId, extra);
         let entry = await searchStore.get(key);
+        // Entries saved by older versions for a Kitsu id that was never mapped
+        // to IMDb are empty by construction; ignore them and resolve again.
+        if (entry && identityUnresolved(entry.media)) entry = undefined;
         // Reuse the media identity resolved the first time. Re-resolving on
         // every request made results depend on transient Cinemeta timeouts.
         let media = entry?.media;
