@@ -336,8 +336,9 @@ function serializableTransform(transform) {
 
 function searchKey(type, id, extra) {
   const filename = path.basename(String(extra.filename || "")).toLowerCase().slice(0, 240);
-  // v3: media identity now carries catalogue titles (needed without filename).
-  return `search:v3:${type}:${id}:${filename}:${String(extra.videoHash || "").toLowerCase()}:${extra.videoSize || ""}`;
+  // v4: media identity carries Kitsu romaji/English titles (needed without a
+  // filename); v3 entries could hold an abbreviated title.
+  return `search:v4:${type}:${id}:${filename}:${String(extra.videoHash || "").toLowerCase()}:${extra.videoSize || ""}`;
 }
 
 export function buildProviders(config) {
