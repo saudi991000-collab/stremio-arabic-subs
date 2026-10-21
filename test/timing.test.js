@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { compareSpeechActivity, compareTimelines, inspectStyling, parseTimeline, retimeSubtitle } from "../src/timing.js";
 import { deepAnalyzeCandidates, sortDeepCandidates } from "../src/deep-analyzer.js";
+import { arabicSrt } from "./fixtures.js";
 
 function makeSrt(offset = 0, scale = 1) {
   return Array.from({ length: 30 }, (_, index) => {
@@ -55,7 +56,7 @@ test("deep analysis verifies candidates from different providers and demotes fai
     async download(item) {
       requested.push(item.provider);
       if (item.provider === "opensubtitles") throw new Error("download unavailable");
-      return { buffer: Buffer.from("1\n00:00:01,000 --> 00:00:03,000\nمرحبا بالعالم\n"), fileName: "episode.srt" };
+      return { buffer: Buffer.from(arabicSrt(40)), fileName: "episode.srt" };
     }
   };
   const cache = { async getFile() { return null; }, async setFile() {} };

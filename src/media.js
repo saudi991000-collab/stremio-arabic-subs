@@ -7,14 +7,22 @@ const SOURCE_ALIASES = [
   ["dvdrip", [/\bdvd\s*rip\b/, /\bdvdrip\b/]]
 ];
 const EDITIONS = ["extended", "directors cut", "director's cut", "imax", "theatrical", "unrated"];
+// Only genuine release markers. "CR" and "MAX" are matched as whole tokens
+// next to a web source (e.g. "CR WEB-DL", "MAX.WEB-DL") because both appear as
+// ordinary words in titles.
 const PLATFORMS = [
   ["netflix", ["netflix", "nf"]],
-  ["crunchyroll", ["crunchyroll"]],
+  ["crunchyroll", ["crunchyroll", "cr web", "cr webrip", "cr webdl", "cr web dl"]],
   ["amazon", ["amazon", "amzn"]],
-  ["max", ["hmax", "hbomax"]],
-  ["disney", ["disney", "dsnp"]],
+  ["max", ["hmax", "hbomax", "max web", "max webrip", "max web dl"]],
+  ["disney", ["disney", "dsnp", "dsny"]],
   ["hulu", ["hulu"]],
-  ["apple-tv", ["atvp", "apple tv"]]
+  ["apple-tv", ["atvp", "apple tv"]],
+  ["paramount", ["pmtp", "paramount"]],
+  ["peacock", ["pcok", "peacock"]],
+  ["shahid", ["shahid"]],
+  ["osn", ["osn", "osnplus"]],
+  ["hidive", ["hidive", "hidi"]]
 ];
 const TITLE_STOP_WORDS = new Set(["the", "a", "an", "and", "of", "in", "on", "to", "with", "no", "de"]);
 
@@ -41,7 +49,9 @@ export function releaseTitle(value = "") {
   ];
   const indexes = boundaries.map((pattern) => stem.search(pattern)).filter((index) => index >= 0);
   if (indexes.length) stem = stem.slice(0, Math.min(...indexes));
-  return normalizeName(stem.replace(/[\[\](){}]/g, " "));
+  // Do not use normalizeName() here: its extension stripping removed the last
+  // word of every title ("The.Last.of.Us" -> "the last of").
+  return stem.replace(/[\[\](){}]/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 export function titleTokens(value = "") {
@@ -112,6 +122,13 @@ export function parseReleaseName(filename = "") {
   const platform = PLATFORMS.find(([, aliases]) => aliases.some((alias) => new RegExp(`(^| )${alias.replace(" ", " +")}( |$)`).test(normalized)))?.[0];
   const suffixGroup = filename.match(/-([A-Za-z0-9]+)(?:\.[A-Za-z0-9]{2,4})?$/)?.[1];
   const prefixGroup = filename.match(/^\s*\[([^\]]+)\]/)?.[1];
+  // Absolute anime numbering ("[Group] Title - 1085 [1080p]") without a season.
+  const absoluteMatch = !seasonEpisode && filename.match(/(?:\s[-–—]\s*|\s(?:ep?|episode)\s*)0*(\d{1,4})(?:v\d+)?(?=\s*(?:\[|\(|$|\.[a-z0-9]{2,4}$|\s))/i);
+  const absoluteEpisode = absoluteMatch && !/^(?:19|20)\d{2}$/.test(absoluteMatch[1]) ? Number(absoluteMatch[1]) : undefined;
+  // Read the frame rate from the raw name: normalizeName() turns "23.976fps"
+  // into "23 976fps", which the previous parser could never match.
+  const fpsMatch = String(filename).match(/(?<![0-9])(23\.976|23\.98|24|25|29\.97|30|50|59\.94|60)[ ._-]?fps(?:[^a-z]|$)/i);
+  const fps = fpsMatch ? (fpsMatch[1] === "23.98" ? 23.976 : Number(fpsMatch[1])) : undefined;
   return {
     raw: filename,
     normalized,
@@ -127,7 +144,8 @@ export function parseReleaseName(filename = "") {
     videoCodec: firstMatch(normalized, /\b(x265|x264|h265|h264|hevc|av1)\b/),
     audioCodec: firstMatch(normalized, /\b(ddp(?:5 1|7 1)?|dts(?: hd)?|aac|atmos|truehd)\b/),
     hdr: /\b(hdr10?\+?|dolby vision|dv)\b/i.test(normalized),
-    fps: Number(firstMatch(normalized, /\b(23\.976|24|25|29\.97|30|50|59\.94|60)fps\b/)) || undefined
+    absoluteEpisode,
+    fps
   };
 }
 

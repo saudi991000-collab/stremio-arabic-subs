@@ -1,9 +1,0 @@
-.env
-data/
-logs/
-tools/
-*.log
-*.zip
-.DS_Store
-Thumbs.db
-

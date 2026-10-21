@@ -1,6 +1,11 @@
 import { parseReleaseName } from "../media.js";
+import { limiterFor, safeFetch } from "../http.js";
 
 const BASE = "https://subf2m.co";
+const HOSTS = ["subf2m.co"];
+// The /download route redirects to Subf2m's own file CDN.
+const DOWNLOAD_HOSTS = ["subf2m.co", "isubcdn.com"];
+const limiter = limiterFor("subf2m", { minIntervalMs: 400, concurrency: 2 });
 const ORDINALS = [
   "specials", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
   "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth", "nineteenth", "twentieth"
@@ -54,32 +59,40 @@ function parseRows(html, context, title) {
       release = exact;
     }
     const rate = block.match(/<span\s+class=["'][^"']*rate\s+([^"']+)["']/i)?.[1] || "";
-    rows.push({ path, release, rating: /good/i.test(rate) ? 8 : /neutral/i.test(rate) ? 4 : /bad/i.test(rate) ? 0 : 2 });
+    const uploader = cleanHtml(block.match(/<p\s+class=["'][^"']*comment-owner[^"']*["'][^>]*>([\s\S]*?)<\/p>/i)?.[1] || "").slice(0, 80);
+    const comment = cleanHtml(block.match(/<p\s+class=["'][^"']*comment-text[^"']*["'][^>]*>([\s\S]*?)<\/p>/i)?.[1] || "").slice(0, 300);
+    rows.push({ path, release, uploader, comment, rating: /good/i.test(rate) ? 8 : /neutral/i.test(rate) ? 4 : /bad/i.test(rate) ? 0 : 2 });
   }
   return rows;
 }
 
-async function fetchPage(path) {
-  const response = await fetch(`${BASE}${path}`, {
-    headers: { Accept: "text/html", "Accept-Language": "en-US,en;q=0.8,ar;q=0.7", "User-Agent": "Mozilla/5.0 ArabicEliteSubs/3.5.1" },
-    signal: AbortSignal.timeout(9000)
+async function fetchPage(path, signal) {
+  const response = await safeFetch(`${BASE}${path}`, {
+    allowedHosts: HOSTS,
+    headers: { Accept: "text/html", "Accept-Language": "en-US,en;q=0.8,ar;q=0.7" },
+    signal,
+    timeoutMs: 7000,
+    limiter,
+    label: "Subf2m page",
+    maxBytes: 4 * 1024 * 1024,
+    okStatuses: [404]
   });
-  if (response.status === 404) return "";
-  if (!response.ok) throw new Error(`Subf2m page failed with HTTP ${response.status}`);
-  return response.text();
+  return response.status === 404 ? "" : response.text();
 }
 
 export class Subf2mProvider {
   constructor() { this.id = "subf2m"; }
 
-  async search(context) {
+  async search(context, _maxPages, { signal } = {}) {
     const title = titleFor(context);
     const slug = slugify(title);
     if (!slug) return [];
     const paths = context.media.type === "series"
       ? [`/subtitles/${slug}-${ORDINALS[Number(context.media.season)] || `${context.media.season}th`}-season/arabic`, `/subtitles/${slug}/arabic`]
       : [`/subtitles/${slug}/arabic`];
-    const pages = await Promise.all(paths.map((path) => fetchPage(path).catch(() => "")));
+    const settled = await Promise.allSettled(paths.map((path) => fetchPage(path, signal)));
+    if (settled.every((item) => item.status === "rejected")) throw settled[0].reason;
+    const pages = settled.map((item) => item.status === "fulfilled" ? item.value : "");
     const seen = new Set();
     return pages.flatMap((html) => parseRows(html, context, title)).filter((row) => {
       if (seen.has(row.path)) return false;
@@ -91,6 +104,8 @@ export class Subf2mProvider {
       downloadRef: row.path,
       fileName: `${row.release.replace(/\.(?:zip|srt|vtt|ass|ssa)$/i, "")}.srt`,
       release: row.release,
+      uploader: row.uploader,
+      comment: row.comment,
       language: "ar",
       hashMatch: false,
       catalogMatch: true,
@@ -108,22 +123,28 @@ export class Subf2mProvider {
     }));
   }
 
-  async download(ref) {
+  async download(ref, { signal } = {}) {
     const path = safeDetailPath(ref);
     if (!path || path.endsWith("/download")) throw new Error("Invalid Subf2m subtitle reference");
-    const detail = await fetchPage(path);
+    const detail = await fetchPage(path, signal);
     const downloadPath = safeDetailPath(detail.match(/<a[^>]+id=["']downloadButton["'][^>]+href=["']([^"']+)/i)?.[1]
       || detail.match(/<a[^>]+href=["']([^"']+)["'][^>]+id=["']downloadButton["']/i)?.[1]);
     if (!downloadPath || !downloadPath.endsWith("/download")) throw new Error("Subf2m download link is missing");
-    const response = await fetch(`${BASE}${downloadPath}`, {
-      headers: { Referer: `${BASE}${path}`, "User-Agent": "Mozilla/5.0 ArabicEliteSubs/3.5.1" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(20000)
+    const response = await safeFetch(`${BASE}${downloadPath}`, {
+      allowedHosts: DOWNLOAD_HOSTS,
+      headers: { Referer: `${BASE}${path}` },
+      signal,
+      timeoutMs: 15000,
+      limiter,
+      label: "Subf2m download",
+      maxBytes: 32 * 1024 * 1024
     });
-    if (!response.ok) throw new Error(`Subf2m download failed with HTTP ${response.status}`);
-    const size = Number(response.headers.get("content-length"));
-    if (size > 64 * 1024 * 1024) throw new Error("Subf2m archive is too large");
-    const fileName = decodeURIComponent(new URL(response.url).pathname.split("/").pop() || "subf2m.zip");
-    return { buffer: Buffer.from(await response.arrayBuffer()), fileName };
+    let fileName = "subf2m.zip";
+    try {
+      fileName = decodeURIComponent(new URL(response.url).pathname.split("/").pop() || fileName);
+    } catch {
+      // keep the default
+    }
+    return { buffer: response.buffer, fileName: /\.[a-z0-9]{2,4}$/i.test(fileName) ? fileName : "subf2m.zip" };
   }
 }

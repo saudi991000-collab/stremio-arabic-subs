@@ -2,14 +2,15 @@
  * @name Arabic SyncRank Companion
  * @description Pins Arabic SyncRank first and links local playback for accurate subtitle timing.
  * @updateUrl none
- * @version 0.7.1
+ * @version 0.8.0
  * @author Local
  */
 
 (() => {
   "use strict";
   const api = window.StremioEnhancedAPI;
-  const ADDON_ID = "com.arabicsyncrank.subtitles";
+  // Must equal the add-on manifest id; 0.7.x used an old id and never matched.
+  const ADDON_ID = "org.arabic.elitesubs.v3";
   const ORDER_BACKUP_KEY = "arabic-syncrank-addon-order-backup-v1";
   const state = { lastMedia: "", capturedStream: "", busy: false, observer: null };
   const LOCAL_COMPANION = "http://127.0.0.1:7000/companion/session";
@@ -76,13 +77,13 @@
       .filter(visible)
       .map((element) => {
         const text = (element.textContent || "").replace(/\s+/g, " ").trim();
-        const percent = Number(text.match(/(\d{1,3})\s*%/)?.[1] || 0);
-        const addonMatch = /Arabic\s*SyncRank/i.test(text);
-        const score = (text.includes("👍") ? 100000 : 0) + (text.includes("💪") ? 10000 : 0) + percent;
-        return { element, text, percent, addonMatch, score };
+        // Labels look like "1 💪👍 🇸🇦 🎨 | Team • Source • ASS • Release".
+        const rank = Number(text.match(/^(\d{1,2})\s(?:[^|]*)\|/)?.[1] || 0);
+        const addonMatch = rank > 0 && /\|.*•/.test(text);
+        return { element, text, rank, addonMatch };
       })
-      .filter((item) => item.addonMatch && item.percent > 0)
-      .sort((a, b) => b.score - a.score || a.text.length - b.text.length);
+      .filter((item) => item.addonMatch)
+      .sort((a, b) => a.rank - b.rank);
   }
 
   function subtitleButton() {
@@ -108,7 +109,9 @@
     await fetch(LOCAL_COMPANION, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ streamUrl, duration: video?.duration, playbackTime: video?.currentTime, title: document.title })
+      // Metadata only. The local add-on validates the URL (loopback:11470) and
+      // analyses audio locally; nothing is uploaded to Render.
+      body: JSON.stringify({ streamUrl, duration: video?.duration, playbackTime: video?.currentTime, title: document.title.slice(0, 200) })
     }).catch(() => null);
   }
 

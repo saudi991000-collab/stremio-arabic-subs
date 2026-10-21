@@ -1,4 +1,9 @@
-const API_HOST = "api.thesubtitledb.org";
+import { fileNameFromDisposition, limiterFor, safeFetch } from "../http.js";
+
+const HOSTS = ["api.thesubtitledb.org"];
+// /get/{id} redirects to files.thesubtitledb.org.
+const DOWNLOAD_HOSTS = ["thesubtitledb.org"];
+const limiter = limiterFor("thesubtitledb", { minIntervalMs: 200, concurrency: 3 });
 
 function rowsOf(payload) {
   return Array.isArray(payload?.subtitles?.items) ? payload.subtitles.items : [];
@@ -15,21 +20,25 @@ export class TheSubtitleDbProvider {
     this.config = { baseUrl: "https://api.thesubtitledb.org/v1", ...config };
   }
 
-  async search(context) {
+  async search(context, _maxPages, { signal } = {}) {
     if (!context.media.imdbId) return [];
     let path = `/by-imdb/tt${context.media.imdbId}`;
     if (context.media.type === "series") {
       path += `/season/${context.media.season}/episode/${context.media.episode}`;
     }
     const params = new URLSearchParams({ lang: "ar", limit: "100" });
-    const response = await fetch(`${this.config.baseUrl}${path}?${params}`, {
-      headers: { Accept: "application/json", "User-Agent": "ArabicEliteSubs/3.5.1" },
-      signal: AbortSignal.timeout(9000)
+    const response = await safeFetch(`${this.config.baseUrl}${path}?${params}`, {
+      allowedHosts: HOSTS,
+      headers: { Accept: "application/json" },
+      signal,
+      timeoutMs: 7000,
+      limiter,
+      label: "TheSubtitleDB search",
+      maxBytes: 4 * 1024 * 1024,
+      okStatuses: [404]
     });
     if (response.status === 404) return [];
-    if (response.status === 429) throw new Error("TheSubtitleDB rate limit reached");
-    if (!response.ok) throw new Error(`TheSubtitleDB search failed with HTTP ${response.status}`);
-    const payload = await response.json();
+    const payload = response.json();
     return rowsOf(payload).map((row) => {
       const id = safeSubtitleId(row.id);
       if (!id || String(row.language || "").toLowerCase() !== "ar") return null;
@@ -49,8 +58,8 @@ export class TheSubtitleDbProvider {
         downloadCount: 0,
         fromTrusted: false,
         hearingImpaired: Boolean(row.hearing_impaired),
-        aiTranslated: false,
-        machineTranslated: false,
+        aiTranslated: Boolean(row.ai_translated || row.machine_translated),
+        machineTranslated: Boolean(row.machine_translated),
         fps: Number(row.fps) || undefined,
         fileSize: Number(row.bytes) || undefined,
         featureDetails: {
@@ -62,19 +71,18 @@ export class TheSubtitleDbProvider {
     }).filter(Boolean);
   }
 
-  async download(ref) {
+  async download(ref, { signal } = {}) {
     const id = safeSubtitleId(ref);
     if (!id) throw new Error("Invalid TheSubtitleDB subtitle id");
-    const response = await fetch(`https://${API_HOST}/get/${id}`, {
-      headers: { Accept: "text/plain,application/octet-stream,*/*", "User-Agent": "ArabicEliteSubs/3.5.1" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(18000)
+    const response = await safeFetch(`https://${HOSTS[0]}/get/${id}`, {
+      allowedHosts: DOWNLOAD_HOSTS,
+      headers: { Accept: "text/plain,application/octet-stream,*/*" },
+      signal,
+      timeoutMs: 12000,
+      limiter,
+      label: "TheSubtitleDB download",
+      maxBytes: 20 * 1024 * 1024
     });
-    if (!response.ok) throw new Error(`TheSubtitleDB download failed with HTTP ${response.status}`);
-    const size = Number(response.headers.get("content-length"));
-    if (size > 20 * 1024 * 1024) throw new Error("TheSubtitleDB subtitle is too large");
-    const disposition = response.headers.get("content-disposition") || "";
-    const fileName = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1] || `${id}.srt`;
-    return { buffer: Buffer.from(await response.arrayBuffer()), fileName: decodeURIComponent(fileName) };
+    return { buffer: response.buffer, fileName: fileNameFromDisposition(response.headers, `${id}.srt`) };
   }
 }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createAddonServer } from "../src/server.js";
 import { readConfig } from "../src/config.js";
+import { arabicAss, arabicSrt } from "./fixtures.js";
 
 async function withServer(provider, callback) {
   const cacheDirectory = await mkdtemp(path.join(tmpdir(), "arabic-sync-test-"));
@@ -12,8 +13,11 @@ async function withServer(provider, callback) {
   const server = await createAddonServer({ config, provider });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
-  try { await callback(`http://127.0.0.1:${address.port}`); }
-  finally { await new Promise((resolve) => server.close(resolve)); }
+  try { await callback(`http://127.0.0.1:${address.port}`, server); }
+  finally {
+    await server.flushBackground();
+    await new Promise((resolve) => server.close(resolve));
+  }
 }
 
 test("serves a valid manifest", async () => {
@@ -44,7 +48,7 @@ test("returns the exact hash result first in top-ten mode", async () => {
 });
 
 test("labels styled ASS subtitles and serves them without stripping styles", async () => {
-  const ass = Buffer.from(`[Script Info]\nTitle: Styled Arabic\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.20,0:00:04.00,Top,,0,0,0,,{\\an8\\c&H00FFFF&}ترجمة عربية ملونة في أعلى الشاشة`);
+  const ass = Buffer.from(arabicAss(40, { styled: true }));
   const provider = {
     async search() {
       return [{ fileId: 20, fileName: "Anime.S01E07.Styled.ass", language: "ar", featureDetails: { seasonNumber: 1, episodeNumber: 7 } }];
@@ -83,7 +87,7 @@ test("returns at most twenty-five labeled subtitle choices", async () => {
 });
 
 test("falls back to another ranked subtitle when the selected download is invalid", async () => {
-  const valid = Buffer.from("1\n00:00:01,000 --> 00:00:03,000\nهذه ترجمة عربية صالحة للاختبار البديل.\n");
+  const valid = Buffer.from(arabicSrt(40, { lines: ["هذه ترجمة عربية صالحة للاختبار البديل.", "سطر عربي آخر في نفس الملف."] }));
   const provider = {
     async search() {
       return [
@@ -104,8 +108,8 @@ test("falls back to another ranked subtitle when the selected download is invali
 });
 
 test("rejects an implausibly long series subtitle and uses a sane fallback", async () => {
-  const long = Buffer.from("1\n02:00:00,000 --> 02:00:02,000\nهذه ترجمة فيلم طويلة وليست حلقة صحيحة.\n");
-  const short = Buffer.from("1\n00:01:00,000 --> 00:01:02,000\nهذه ترجمة الحلقة الصحيحة والقصيرة.\n");
+  const long = Buffer.from(arabicSrt(40, { start: 7200, lines: ["هذه ترجمة فيلم طويلة وليست حلقة صحيحة.", "سطر آخر من ترجمة الفيلم الطويل."] }));
+  const short = Buffer.from(arabicSrt(40, { start: 60, lines: ["هذه ترجمة الحلقة الصحيحة والقصيرة.", "سطر آخر من الحلقة الصحيحة."] }));
   const provider = {
     async search() {
       return [

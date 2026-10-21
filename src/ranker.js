@@ -1,25 +1,35 @@
-import { normalizeName, parseReleaseName, titlesLikelyMatch } from "./media.js";
+import { normalizeName, parseReleaseName, titleSimilarity, titleTokens, titlesLikelyMatch } from "./media.js";
+import { findArabicTeam } from "./teams.js";
+import { explicitMachineLabel } from "./quality.js";
 
-const ARABIC_FANSUB_TEAMS = [
-  ["3ASQ", /(?:^|[^a-z0-9])3asq(?:[^a-z0-9]|$)/i],
-  ["Memories", /(?:^|[^a-z0-9])memories(?:[- .]?fansub)?(?:[^a-z0-9]|$)/i],
-  ["ESPADAS", /(?:^|[^a-z0-9])espadas(?:[^a-z0-9]|$)/i],
-  ["DAC Subs", /(?:^|[^a-z0-9])dac[- .]?subs?(?:[^a-z0-9]|$)/i],
-  ["Asahi Fansubs", /(?:^|[^a-z0-9])asahi[- .]?fansubs?(?:[^a-z0-9]|$)/i],
-  ["Arabic Anime Team", /(?:^|[^a-z0-9])arabic[- .]?anime[- .]?team(?:[^a-z0-9]|$)/i],
-  ["Kaizen", /(?:^|[^a-z0-9])kaizen(?:[^a-z0-9]|$)/i],
-  ["Aboody Subs", /(?:^|[^a-z0-9])abo+dy[- .]?subs?(?:[^a-z0-9]|$)/i],
-  ["Al-Amri Fansubs", /(?:^|[^a-z0-9])al[- .]?amri[- .]?fansubs?(?:[^a-z0-9]|$)/i],
-  ["ALanime Fansub", /(?:^|[^a-z0-9])alanime[- .]?fansubs?(?:[^a-z0-9]|$)/i],
-  ["Mirai Subs", /(?:^|[^a-z0-9])mirai[- .]?(?:subs?|fansubs?)(?:[^a-z0-9]|$)/i]
+const NON_FEATURE_CONTENT = [
+  /(?:^|[^a-z])(?:cinematic[ ._-]*)?(?:playthrough|walkthrough|gameplay|let'?s[ ._-]*play)(?:[^a-z]|$)/i,
+  /(?:^|[^a-z])(?:official[ ._-]*)?(?:trailer|teaser)(?:[^a-z]|$)/i,
+  /(?:^|[^a-z])(?:featurette|bloopers?|gag[ ._-]*reel|deleted[ ._-]*scenes?|behind[ ._-]*the[ ._-]*scenes|making[ ._-]*of|inside[ ._-]*the[ ._-]*episode)(?:[^a-z]|$)/i
 ];
 
+// Share of title tokens matched, taking the better of the two directions.
+export function titleCoverage(left, right) {
+  const a = [...new Set(titleTokens(left))];
+  const b = [...new Set(titleTokens(right))];
+  if (!a.length || !b.length) return 1;
+  const shared = titleSimilarity(left, right) * Math.min(a.length, b.length);
+  return Math.max(shared / a.length, shared / b.length);
+}
+
+// These sources all serve the same OpenSubtitles catalogue. An identical file
+// name from several of them is one subtitle, not several choices.
+const OPENSUBTITLES_FAMILY = new Set(["opensubtitles", "opensubtitles-org", "stremio-v3"]);
+const FAMILY_PREFERENCE = ["opensubtitles-org", "stremio-v3", "opensubtitles", "wyzie", "subkong"];
+function familyKey(candidate) {
+  const origin = String(candidate.origin || "").toLowerCase();
+  const family = OPENSUBTITLES_FAMILY.has(candidate.provider) || /opensubtitles/.test(origin);
+  return family ? `os:${normalizeName(candidate.fileName || candidate.release)}` : "";
+}
+
+// Team definitions live in config/arabic-teams.json.
 export function arabicFansubTeam(candidate = {}) {
-  const value = `${candidate.fileName || ""} ${candidate.release || ""}`;
-  const matched = ARABIC_FANSUB_TEAMS.find(([, pattern]) => pattern.test(value));
-  if (matched) return matched[0];
-  if (candidate.provider === "miraianime") return "Mirai Fansubs";
-  return "";
+  return findArabicTeam(candidate);
 }
 
 function same(a, b) {
@@ -67,20 +77,58 @@ export function scoreCandidate(candidate, context, preferences = {}) {
 
   const candidateSeason = details.seasonNumber ?? actual.season;
   const candidateEpisode = details.episodeNumber ?? actual.episode;
-  if (context.media.type === "series") {
+  // Anime files are often numbered absolutely ("Title - 1085") while Stremio
+  // asks for S21E13. Accept the absolute number only when it is known for the
+  // requested episode and the file carries no conflicting season.
+  const absoluteMatch = context.media.type === "series" && Number.isInteger(context.media.absoluteEpisode) &&
+    details.episodeNumber == null && actual.season == null &&
+    (actual.absoluteEpisode === context.media.absoluteEpisode || actual.episode === context.media.absoluteEpisode) &&
+    context.media.absoluteEpisode !== context.media.episode;
+  if (context.media.type === "series" && !absoluteMatch) {
     if (candidateSeason != null && Number(candidateSeason) !== context.media.season) return null;
     if (candidateEpisode != null && Number(candidateEpisode) !== context.media.episode) return null;
+    // Provider catalogues sometimes attach other seasons' files to an episode
+    // ("Code Geass R2 - 01" under S01E01). An explicit season/episode in the
+    // filename that contradicts the request wins over the metadata.
+    if (!candidate.hashMatch) {
+      if (actual.season != null && actual.season !== context.media.season) return null;
+      if (actual.episode != null && actual.season != null && actual.episode !== context.media.episode &&
+        !new RegExp(`e0*${context.media.episode}(?!\\d)`, "i").test(candidate.fileName || candidate.release || "")) return null;
+    }
+    if (actual.absoluteEpisode != null && actual.season == null && details.episodeNumber == null &&
+      actual.absoluteEpisode !== context.media.episode && actual.absoluteEpisode !== context.media.absoluteEpisode) return null;
   }
-  if (wanted.year && details.year && Number(details.year) !== wanted.year) return null;
+  // Movies: release years differ by one surprisingly often (festival vs. wide
+  // release), but a larger gap means a different film (remake, sequel).
+  const yearTolerance = context.media.type === "movie" ? 1 : 0;
+  if (wanted.year && details.year && Math.abs(Number(details.year) - wanted.year) > yearTolerance) return null;
+  if (wanted.year && actual.year && context.media.type === "movie" && Math.abs(actual.year - wanted.year) > 1) return null;
   if (wanted.edition && actual.edition && wanted.edition !== actual.edition) return null;
   if (candidate.language && !/^ar(a|abic)?$/i.test(candidate.language)) return null;
-  if ((candidate.machineTranslated || candidate.aiTranslated) && !preferences.allowMachineTranslated) return null;
-  const titleMatch = Boolean(wanted.title && actual.title && titlesLikelyMatch(context.extra.filename, candidate.fileName || candidate.release || ""));
+  if (candidate.flaggedBad) return null;
+  const labelledMachine = explicitMachineLabel(candidate.fileName, candidate.release, candidate.comment);
+  if ((candidate.machineTranslated || candidate.aiTranslated || labelledMachine) && !preferences.allowMachineTranslated) return null;
+  const candidateName = candidate.fileName || candidate.release || "";
+  const titleMatch = Boolean(wanted.title && actual.title && titlesLikelyMatch(context.extra.filename, candidateName));
   if (!context.media.imdbId && wanted.title && actual.title && !titleMatch) return null;
+  // Extras and unrelated media filed under the same id: game playthroughs,
+  // trailers, featurettes, "making of"...
+  const extraContent = NON_FEATURE_CONTENT.find((pattern) => pattern.test(candidateName) && !pattern.test(context.extra.filename || ""));
+  if (extraContent && !candidate.hashMatch) return null;
+  // A release-style name ("Lost.S01E01.1080p...") whose title shares nothing
+  // with the playing file or the catalogue title belongs to another work.
+  // Coverage is checked in both directions: "Blood-C: The Last Dark" or "The
+  // Last Days of Ptolemy Grey" share one word with "The Last of Us" but cover
+  // neither title well enough to be the same work.
+  if (!candidate.hashMatch && actual.title && (actual.season != null || actual.year || actual.absoluteEpisode != null) && titleTokens(candidateName).length) {
+    const known = [context.extra.filename, context.media.catalogTitle, context.media.title, context.media.releaseTitle].filter(Boolean);
+    if (known.length && known.every((name) => titleCoverage(name, candidateName) < 0.6)) return null;
+  }
 
   let syncScore = 0;
   let qualityScore = 0;
   const reasons = [];
+  if (context.media.type === "series") reasons.push("series");
   const exactHash = Boolean(candidate.hashMatch && context.extra.videoHash);
 
   if (exactHash) {
@@ -145,13 +193,15 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   }
 
   const metadataEpisodeMatch = context.media.type === "series" && Number(details.episodeNumber) === context.media.episode;
-  const filenameEpisodeMatch = context.media.type === "series" && actual.episode === context.media.episode;
+  const filenameEpisodeMatch = context.media.type === "series" && (actual.episode === context.media.episode || absoluteMatch);
   // Some providers scope their API request to the exact season and episode but
   // return generic filenames (for example, "Arabic.srt"). Treat the scoped API
   // result as episode evidence instead of requiring the episode number to be
   // repeated in the subtitle filename.
   const scopedEpisodeMatch = context.media.type === "series" && candidate.episodeScoped === true;
   const episodeEvidence = metadataEpisodeMatch || filenameEpisodeMatch || releaseKind === "episode" || scopedEpisodeMatch;
+  if (episodeEvidence) reasons.push("episode-evidence");
+  if (absoluteMatch) reasons.push("absolute-episode");
   const releaseSignals = [
     wanted.source && actual.source && compatibleSource(wanted.source, actual.source),
     same(wanted.platform, actual.platform),
@@ -218,19 +268,50 @@ export function rankCandidates(candidates, context, preferences = {}) {
   const scored = candidates
     .map((candidate) => scoreCandidate(candidate, context, preferences))
     .filter(Boolean)
-    .sort((a, b) => b.tier - a.tier || b.confidence - a.confidence || b.syncScore - a.syncScore || b.qualityScore - a.qualityScore || String(a.fileId).localeCompare(String(b.fileId)));
+    .sort((a, b) => b.tier - a.tier || b.confidence - a.confidence || b.syncScore - a.syncScore || b.qualityScore - a.qualityScore || stableKey(a).localeCompare(stableKey(b)));
 
+  // Only collapse identical names from the same provider here. Two providers
+  // often carry different translations under the same release name; true
+  // duplicates are removed later by comparing the downloaded content.
   const seen = new Set();
-  return scored.filter((candidate) => {
-    const key = normalizeName(candidate.fileName || candidate.release);
+  const unique = scored.filter((candidate) => {
+    const key = `${candidate.provider || "default"}:${normalizeName(candidate.fileName || candidate.release)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  // Keep one copy per OpenSubtitles-catalogue file, preferring the mirror
+  // without a daily download quota; a hash match always wins.
+  const best = new Map();
+  for (const candidate of unique) {
+    const key = familyKey(candidate);
+    if (!key) continue;
+    const current = best.get(key);
+    const rank = (item) => (item.hashMatch ? -10 : 0) + (FAMILY_PREFERENCE.indexOf(item.provider) + 1 || 9);
+    if (!current || rank(candidate) < rank(current)) best.set(key, candidate);
+  }
+  return unique.filter((candidate) => {
+    const key = familyKey(candidate);
+    return !key || best.get(key) === candidate;
+  });
 }
 
-export function resultLabel(candidate, options = {}) {
-  const matchedName = candidate.reasons?.some((reason) => ["exact-release", "strong-release-match", "same-title"].includes(reason));
-  const exactMedia = candidate.reasons?.includes("exact-hash");
-  return matchedName || exactMedia ? "💪👍" : "";
+export function stableKey(candidate) {
+  return `${candidate.provider || "default"}:${String(candidate.downloadRef ?? candidate.fileId)}`;
+}
+
+// 💪👍 means "this subtitle's release name matches the playing video". It is
+// given to every qualifying result, not only the first one:
+// exact hash, exact release name, a strong release match (title + episode +
+// platform/source/group/resolution), or the same title with confirmed episode
+// evidence for a series. A season pack or a timing mismatch never qualifies.
+export function releaseMatched(candidate) {
+  const reasons = candidate.reasons || [];
+  if (reasons.includes("season-pack") || reasons.includes("timing-mismatch")) return reasons.includes("exact-hash");
+  if (reasons.some((reason) => ["exact-hash", "exact-release", "strong-release-match"].includes(reason))) return true;
+  return reasons.includes("same-title") && (!reasons.includes("series") || reasons.includes("episode-evidence"));
+}
+
+export function resultLabel(candidate) {
+  return releaseMatched(candidate) ? "💪👍" : "";
 }

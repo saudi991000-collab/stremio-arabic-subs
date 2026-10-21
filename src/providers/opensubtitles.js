@@ -1,11 +1,10 @@
 import { normalizeName, parseReleaseName } from "../media.js";
+import { HttpError, limiterFor, safeFetch } from "../http.js";
 
+const API_HOSTS = ["api.opensubtitles.com"];
 const DOWNLOAD_HOSTS = ["opensubtitles.com", "opensubtitles.org"];
-
-function allowedDownloadUrl(value) {
-  const url = new URL(value);
-  return url.protocol === "https:" && DOWNLOAD_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
-}
+// OpenSubtitles allows about 5 requests per second per consumer; stay below.
+const limiter = limiterFor("opensubtitles", { minIntervalMs: 220, concurrency: 3 });
 
 function mapResults(payload) {
   const results = [];
@@ -19,6 +18,8 @@ function mapResults(payload) {
         fileName: file.file_name || attributes.release || "subtitle.srt",
         fileSize: Number(file.file_size || attributes.file_size) || undefined,
         release: attributes.release || "",
+        comment: String(attributes.comments || "").slice(0, 300),
+        uploader: String(attributes.uploader?.name || "").slice(0, 80),
         language: attributes.language || "ar",
         hashMatch: Boolean(attributes.moviehash_match),
         fps: Number(attributes.fps) || undefined,
@@ -67,7 +68,7 @@ function filenameQuery(context) {
   return query.length >= 3 ? query.toLowerCase() : "";
 }
 
-function referenceReleaseScore(candidate, context) {
+export function referenceReleaseScore(candidate, context) {
   const wanted = parseReleaseName(context.extra.filename || "");
   const actual = parseReleaseName(candidate.fileName || candidate.release || "");
   const wantedName = normalizeName(context.extra.filename || "");
@@ -98,16 +99,33 @@ export class OpenSubtitlesProvider {
     return {
       "Api-Key": this.config.apiKey,
       "User-Agent": this.config.userAgent,
+      Accept: "application/json",
       ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
       ...extra
     };
   }
 
   async request(url, options = {}) {
-    const response = await fetch(url, { ...options, headers: this.headers(options.headers), signal: AbortSignal.timeout(12000) });
-    if (response.status === 429) throw new Error("OpenSubtitles download or request quota has been reached");
-    if (!response.ok) throw new Error(`OpenSubtitles request failed with HTTP ${response.status}`);
-    return response;
+    try {
+      return await safeFetch(url, {
+        ...options,
+        allowedHosts: API_HOSTS,
+        headers: this.headers(options.headers),
+        timeoutMs: options.timeoutMs || 8000,
+        limiter,
+        retries: options.retries ?? 1,
+        label: "OpenSubtitles request",
+        maxBytes: 4 * 1024 * 1024
+      });
+    } catch (error) {
+      // 406 is how /download reports "You have downloaded your allowed N
+      // subtitles for 24h". It is a temporary quota, never a bad file.
+      if (error instanceof HttpError && (error.status === 429 || error.status === 406)) {
+        throw new HttpError("OpenSubtitles download or request quota has been reached", { status: error.status, rateLimited: true, retryable: false });
+      }
+      if (error instanceof HttpError && error.status) throw new HttpError(`OpenSubtitles request failed with HTTP ${error.status}`, { status: error.status });
+      throw error;
+    }
   }
 
   async login() {
@@ -115,10 +133,10 @@ export class OpenSubtitlesProvider {
     const response = await this.request(`${this.config.baseUrl}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: this.config.username, password: this.config.password })
+      body: JSON.stringify({ username: this.config.username, password: this.config.password }),
+      retries: 0
     });
-    const payload = await response.json();
-    this.token = payload.token || "";
+    this.token = response.json()?.token || "";
   }
 
   async ensureLogin() {
@@ -135,44 +153,42 @@ export class OpenSubtitlesProvider {
     await this.loginPromise;
   }
 
-  async searchPage(params, page) {
+  async searchPage(params, page, signal) {
     const query = new URLSearchParams({ ...params, page: String(page) });
-    const response = await this.request(`${this.config.baseUrl}/subtitles?${query}`);
+    const response = await this.request(`${this.config.baseUrl}/subtitles?${query}`, { signal });
     return response.json();
   }
 
-  async search(context, maxPages = 2) {
+  async searchAllPages(params, maxPages, signal, extra = {}) {
+    const all = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const payload = await this.searchPage(params, page, signal);
+      all.push(...mapResults(payload).map((item) => ({ ...item, ...extra })));
+      const totalPages = Number(
+        payload?.total_pages ??
+        payload?.pagination?.total_pages ??
+        (payload?.total_count && payload?.per_page ? Math.ceil(payload.total_count / payload.per_page) : 1)
+      );
+      if (!Number.isFinite(totalPages) || page >= totalPages) break;
+    }
+    return all;
+  }
+
+  async search(context, maxPages = 2, { signal } = {}) {
     if (!this.config.apiKey) throw new Error("OPENSUBTITLES_API_KEY is missing");
     const common = scopedParams(context, "ar");
     const query = filenameQuery(context);
-    const searches = [];
+    const scoped = { catalogMatch: Boolean(context.media.imdbId), episodeScoped: context.media.type === "series" };
+    const jobs = [];
     if (context.extra.videoHash) {
-      searches.push({
+      jobs.push(this.searchAllPages({
         ...common,
         moviehash: context.extra.videoHash,
         ...(context.extra.videoSize ? { moviebytesize: String(context.extra.videoSize) } : {}),
         ...(query ? { query } : {})
-      });
+      }, 1, signal, scoped));
     }
-    if (context.media.imdbId) searches.push(common);
-
-    const all = [];
-    for (const params of searches) {
-      for (let page = 1; page <= maxPages; page += 1) {
-        const payload = await this.searchPage(params, page);
-        all.push(...mapResults(payload).map((item) => ({
-          ...item,
-          catalogMatch: Boolean(context.media.imdbId),
-          episodeScoped: context.media.type === "series"
-        })));
-        const totalPages = Number(
-          payload?.total_pages ??
-          payload?.pagination?.total_pages ??
-          (payload?.total_count && payload?.per_page ? Math.ceil(payload.total_count / payload.per_page) : 1)
-        );
-        if (!Number.isFinite(totalPages) || page >= totalPages) break;
-      }
-    }
+    if (context.media.imdbId) jobs.push(this.searchAllPages(common, maxPages, signal, scoped));
     // New episodes are often searchable by their release filename before the
     // provider has attached them to the parent IMDb entry. Always merge one
     // filename search instead of using it only when the IMDb search is empty.
@@ -187,14 +203,24 @@ export class OpenSubtitlesProvider {
         fallback.season_number = String(context.media.season);
         fallback.episode_number = String(context.media.episode);
       }
-      const payload = await this.searchPage(fallback, 1);
-      all.push(...mapResults(payload).map((item) => ({ ...item, catalogMatch: false, episodeScoped: false })));
+      jobs.push(this.searchAllPages(fallback, 1, signal, { catalogMatch: false, episodeScoped: false }));
     }
-    const unique = new Map(all.map((item) => [item.fileId, item]));
+    // The searches are independent; run them together so the provider fits
+    // inside the listing deadline. A failed sub-search does not discard the
+    // others, but if every sub-search failed the provider reports an error.
+    const settled = await Promise.allSettled(jobs);
+    const fulfilled = settled.filter((item) => item.status === "fulfilled");
+    if (!fulfilled.length && settled.length) throw settled[0].reason;
+    const unique = new Map();
+    for (const item of fulfilled.flatMap((result) => result.value)) {
+      const existing = unique.get(item.fileId);
+      // Keep the most informative copy (hash match / catalogue scoped first).
+      if (!existing || (item.hashMatch && !existing.hashMatch) || (item.catalogMatch && !existing.catalogMatch && !existing.hashMatch)) unique.set(item.fileId, item);
+    }
     return [...unique.values()];
   }
 
-  async findTimingReference(context) {
+  async findTimingReference(context, { signal } = {}) {
     if (!this.config.apiKey || !context.media.imdbId) return null;
     const common = scopedParams(context, "en");
     const query = filenameQuery(context);
@@ -204,13 +230,13 @@ export class OpenSubtitlesProvider {
         moviehash: context.extra.videoHash,
         ...(context.extra.videoSize ? { moviebytesize: String(context.extra.videoSize) } : {}),
         ...(query ? { query } : {})
-      }, 1);
+      }, 1, signal);
       const exact = mapResults(payload)
         .filter((candidate) => candidate.hashMatch)
         .sort((a, b) => b.rating - a.rating || b.downloadCount - a.downloadCount)[0];
       if (exact) return { ...exact, provider: this.id, timingReferenceKind: "exact-hash" };
     }
-    const payload = await this.searchPage(common, 1);
+    const payload = await this.searchPage(common, 1, signal);
     const releaseMatched = mapResults(payload)
       .map((candidate) => ({ candidate, score: referenceReleaseScore(candidate, context) }))
       .filter((item) => item.score >= 45)
@@ -220,7 +246,7 @@ export class OpenSubtitlesProvider {
       : null;
   }
 
-  async getDownloadLink(fileId) {
+  async getDownloadLink(fileId, signal) {
     // Authenticate before the first download whenever account credentials are
     // configured. Waiting for a 401 kept paid/VIP accounts on the anonymous
     // quota because quota exhaustion is normally reported as 429 instead.
@@ -228,7 +254,9 @@ export class OpenSubtitlesProvider {
     const perform = () => this.request(`${this.config.baseUrl}/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_id: fileId })
+      body: JSON.stringify({ file_id: fileId }),
+      signal,
+      retries: 0
     });
     let response;
     try {
@@ -241,26 +269,23 @@ export class OpenSubtitlesProvider {
         throw error;
       }
     }
-    const payload = await response.json();
-    if (!payload.link || !allowedDownloadUrl(payload.link)) throw new Error("Provider returned an unsafe download URL");
+    const payload = response.json();
+    if (!payload?.link) throw new Error("Provider returned no download URL");
     return { url: payload.link, fileName: payload.file_name || "subtitle.srt" };
   }
 
-  async download(fileId) {
-    const { url, fileName } = await this.getDownloadLink(fileId);
-    let current = url;
-    for (let redirects = 0; redirects <= 3; redirects += 1) {
-      if (!allowedDownloadUrl(current)) throw new Error("Blocked subtitle redirect host");
-      const response = await fetch(current, { redirect: "manual", signal: AbortSignal.timeout(15000) });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        current = new URL(response.headers.get("location"), current).toString();
-        continue;
-      }
-      if (!response.ok) throw new Error(`Subtitle download failed with HTTP ${response.status}`);
-      const declaredLength = Number(response.headers.get("content-length"));
-      if (declaredLength > 20 * 1024 * 1024) throw new Error("Subtitle download is too large");
-      return { buffer: Buffer.from(await response.arrayBuffer()), fileName };
-    }
-    throw new Error("Too many subtitle redirects");
+  async download(fileId, { signal } = {}) {
+    const { url, fileName } = await this.getDownloadLink(fileId, signal);
+    const response = await safeFetch(url, {
+      allowedHosts: DOWNLOAD_HOSTS,
+      signal,
+      timeoutMs: 12000,
+      label: "Subtitle download",
+      maxBytes: 20 * 1024 * 1024
+    }).catch((error) => {
+      if (/Blocked host/.test(error.message)) throw new Error("Provider returned an unsafe download URL");
+      throw error;
+    });
+    return { buffer: response.buffer, fileName };
   }
 }

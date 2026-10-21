@@ -12,6 +12,9 @@ import { AniKotoProvider } from "../src/providers/anikoto.js";
 import { TheSubtitleDbProvider } from "../src/providers/thesubtitledb.js";
 import { MoraProvider } from "../src/providers/mora.js";
 import { Subf2mProvider } from "../src/providers/subf2m.js";
+import { OpenSubtitlesOrgProvider } from "../src/providers/opensubtitles-org.js";
+import { YifySubtitlesProvider } from "../src/providers/yifysubtitles.js";
+import { isTransientError } from "../src/deep-analyzer.js";
 
 const context = {
   media: { type: "series", imdbId: "994314", season: 1, episode: 7 },
@@ -98,6 +101,7 @@ test("searches SubDL by the played filename when IMDb conflicts", async () => {
   });
   assert.equal(requested.searchParams.get("file_name"), "Wednesday.S01E02.2160p.NF.WEB-DL.mkv");
   assert.equal(requested.searchParams.has("imdb_id"), false);
+  assert.equal(requested.searchParams.has("hi"), false, "hi=1 filters SubDL down to hearing-impaired files only");
 });
 
 test("uses the parent IMDb id for a series and only falls back to the filename when needed", async () => {
@@ -220,13 +224,15 @@ test("discovers MiraiAnime ZIP packs for the requested anime episode", async () 
   });
 });
 
-test("resolves AniKoto and keeps only its Arabic subtitle track with playback headers", async () => {
+test("resolves AniKoto through the ARM id mapping and keeps only its Arabic subtitle track with playback headers", async () => {
   let calls = 0;
-  await withMockFetch(async (url, options = {}) => {
+  await withMockFetch(async (url) => {
     calls += 1;
-    if (String(url) === "https://graphql.anilist.co") {
-      assert.equal(options.method, "POST");
-      return new Response(JSON.stringify({ data: { Media: { id: 1575, title: { english: "Code Geass", romaji: "Code Geass" } } } }), { status: 200 });
+    if (String(url).startsWith("https://arm.haglund.dev/api/v2/imdb?id=tt0994314")) {
+      return new Response(JSON.stringify([
+        { anilist: 1575, media: "TV", "thetvdb-season": 1 },
+        { anilist: 2904, media: "TV", "thetvdb-season": 2 }
+      ]), { status: 200 });
     }
     if (String(url).includes("/episodes/anikoto/1575")) {
       return new Response(JSON.stringify({ episodes: { sub: [{ id: "watch/anikoto/1575/sub/anikoto-7", number: 7 }] } }), { status: 200 });
@@ -269,6 +275,13 @@ test("uses an English release match as a timing reference when an exact hash ref
   });
 });
 
+test("treats the OpenSubtitles 406 daily download limit as a temporary quota, not a bad file", async () => {
+  await withMockFetch(async () => new Response(JSON.stringify({ message: "You have downloaded your allowed 5 subtitles for 24h." }), { status: 406 }), async () => {
+    const provider = new OpenSubtitlesProvider({ apiKey: "test", baseUrl: "https://api.opensubtitles.com/api/v1", userAgent: "test" });
+    await assert.rejects(() => provider.download(123), (error) => error.rateLimited === true && isTransientError(error));
+  });
+});
+
 test("maps Arabic SubSource results", async () => {
   let calls = 0;
   await withMockFetch(async () => {
@@ -286,6 +299,63 @@ test("maps Arabic SubSource results", async () => {
     assert.match(results[0].fileName, /\.srt$/);
     assert.equal(results[0].featureDetails.episodeNumber, undefined);
   });
+});
+
+test("maps OpenSubtitles.org Arabic rows, drops machine, forced and bad files", async () => {
+  const urls = [];
+  await withMockFetch(async (url, options = {}) => {
+    urls.push({ url: String(url), ua: options.headers?.["X-User-Agent"] });
+    return new Response(JSON.stringify([
+      { IDSubtitleFile: "11", SubFileName: "Code.Geass.S01E07.WEB-DL.srt", SubLanguageID: "ara", SubFormat: "srt", MatchedBy: "imdbid", SeriesSeason: "1", SeriesEpisode: "7", SubDownloadsCnt: "900", SubFromTrusted: "1", SubTranslator: "3ASQ", SubDownloadLink: "https://dl.opensubtitles.org/en/download/src-api/vrf-1/filead/11.gz" },
+      { IDSubtitleFile: "12", SubFileName: "Code.Geass.S01E07.auto.srt", SubLanguageID: "ara", SubAutoTranslation: "1", SeriesEpisode: "7", SubDownloadLink: "https://dl.opensubtitles.org/x/12.gz" },
+      { IDSubtitleFile: "13", SubFileName: "forced.srt", SubLanguageID: "ara", SubForeignPartsOnly: "1", SeriesEpisode: "7", SubDownloadLink: "https://dl.opensubtitles.org/x/13.gz" },
+      { IDSubtitleFile: "14", SubFileName: "english.srt", SubLanguageID: "eng", SeriesEpisode: "7", SubDownloadLink: "https://dl.opensubtitles.org/x/14.gz" },
+      { IDSubtitleFile: "15", SubFileName: "Code.Geass.S01E08.srt", SubLanguageID: "ara", SeriesEpisode: "8", SubDownloadLink: "https://dl.opensubtitles.org/x/15.gz" }
+    ]), { status: 200 });
+  }, async () => {
+    const provider = new OpenSubtitlesOrgProvider({ userAgent: "ArabicEliteSubs v3.6.0" });
+    const results = await provider.search(context);
+    // The machine-translated row is mapped but flagged; the ranker drops it.
+    assert.deepEqual(results.map((item) => item.fileId).sort(), ["11", "12"]);
+    assert.equal(results.find((item) => item.fileId === "12").machineTranslated, true);
+    assert.equal(results.find((item) => item.fileId === "11").translator, "3ASQ");
+  });
+  assert.match(urls[0].url, /\/search\/episode-7\/imdbid-0994314\/season-1\/sublanguageid-ara$/);
+  assert.equal(urls[0].ua, "ArabicEliteSubs v3.6.0");
+});
+
+test("parses Arabic rows from a YIFY movie page and picks the closest release", async () => {
+  const page = `<table><tr data-id="1"><td class="rating-cell"><span class="label">7</span></td><td class="flag-cell"><span class="sub-lang">Arabic</span></td><td><a href="/subtitles/dune-2024-arabic-yify-1"><span class="text-muted">subtitle</span> Dune.Part.Two.2024.720p.WEBRip<br /> Dune.Part.Two.2024.1080p.WEB-DL.DDP5.1</a></td><td class="uploader-cell"><a href="/user/x">Translator</a></td></tr>
+  <tr data-id="2"><td class="rating-cell"><span class="label">3</span></td><td class="flag-cell"><span class="sub-lang">English</span></td><td><a href="/subtitles/dune-2024-english-yify-2">Dune.Part.Two.2024</a></td></tr></table>`;
+  await withMockFetch(async () => new Response(page, { status: 200 }), async () => {
+    const provider = new YifySubtitlesProvider();
+    const results = await provider.search({ media: { type: "movie", imdbId: "15239678" }, extra: { filename: "Dune.Part.Two.2024.1080p.WEB-DL.DDP5.1.mkv" } });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].release, "Dune.Part.Two.2024.1080p.WEB-DL.DDP5.1");
+    assert.equal(results[0].downloadRef, "dune-2024-arabic-yify-1");
+    assert.equal(results[0].uploader, "Translator");
+    assert.deepEqual(await provider.search({ media: { type: "series", imdbId: "1", season: 1, episode: 1 }, extra: {} }), []);
+  });
+  await assert.rejects(() => new YifySubtitlesProvider().download("../../etc/passwd"), /Invalid YIFY/);
+});
+
+test("finds the Arabic TVsubtitles track for the exact episode", async () => {
+  const { TvSubtitlesProvider, parseEpisodeRow } = await import("../src/providers/tvsubtitles.js");
+  const season = `<tr><td>1x06</td><td><a href="episode-1-ar.html"><img src="images/flags/ar.gif"></a></td></tr><tr><td>1x07</td><td><a href="episode-99-en.html"><img src="images/flags/en.gif"></a><a href="episode-99-ar.html"><img src="images/flags/ar.gif"></a></td></tr>`;
+  assert.equal(parseEpisodeRow(season, 1, 7), "episode-99-ar.html");
+  assert.equal(parseEpisodeRow(season, 1, 8), null);
+  await withMockFetch(async (url) => {
+    const value = String(url);
+    if (value.endsWith("/tvshows.html")) return new Response(`<a href="/tvshow-55-1.html"><b>Code Geass</b></a><a href="/tvshow-56-1.html"><b>Code Geass R2</b></a>`, { status: 200 });
+    if (value.endsWith("/tvshow-55-1.html")) return new Response(season, { status: 200 });
+    if (value.endsWith("/episode-99-ar.html")) return new Response(`<a href="/subtitle-501.html">Code.Geass.S01E07.BluRay</a><a href="/subtitle-502.html">Code.Geass.S01E07.DVDRip</a>`, { status: 200 });
+    throw new Error(`unexpected ${value}`);
+  }, async () => {
+    const results = await new TvSubtitlesProvider().search({ ...context, media: { ...context.media, catalogTitle: "Code Geass" } });
+    assert.deepEqual(results.map((item) => item.downloadRef), ["501", "502"]);
+    assert.match(results[0].fileName, /S01E07/);
+  });
+  await assert.rejects(() => new TvSubtitlesProvider().download("../x"), /Invalid TVsubtitles/);
 });
 
 test("maps ArabicSubs filename matches", async () => {

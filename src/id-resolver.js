@@ -66,6 +66,7 @@ async function resolveKitsu(type, id, fetchImpl) {
   if (!Number.isInteger(season) || !Number.isInteger(episode)) {
     return { ...genericVideoId(type, id), imdbId, title: meta.name || "" };
   }
+  const absoluteEpisode = Number(video?.absoluteEpisode ?? (seasonHint == null ? episodeHint : undefined));
   return {
     type,
     id: `tt${imdbId}:${season}:${episode}`,
@@ -73,8 +74,21 @@ async function resolveKitsu(type, id, fetchImpl) {
     imdbId,
     season,
     episode,
+    ...(Number.isInteger(absoluteEpisode) && absoluteEpisode > 0 ? { absoluteEpisode } : {}),
     title: meta.name || ""
   };
+}
+
+// Absolute episode number from Cinemeta's episode list (specials excluded),
+// used to match anime files numbered "Title - 1085".
+export function absoluteEpisodeFromVideos(videos, season, episode) {
+  if (!Array.isArray(videos) || !Number.isInteger(season) || !Number.isInteger(episode) || season < 1) return undefined;
+  const regular = videos
+    .filter((video) => Number(video.season) >= 1 && Number(video.episode ?? video.number) >= 1)
+    .map((video) => ({ season: Number(video.season), episode: Number(video.episode ?? video.number) }))
+    .sort((a, b) => a.season - b.season || a.episode - b.episode);
+  const index = regular.findIndex((video) => video.season === season && video.episode === episode);
+  return index >= 0 ? index + 1 : undefined;
 }
 
 export async function resolveVideoId(type, id, options = {}) {
@@ -155,6 +169,27 @@ export async function alignMediaToFilename(media, extra, options = {}) {
   const meta = metaResult.status === "fulfilled" ? metaResult.value : null;
   const replacement = titleResult.status === "fulfilled" ? titleResult.value : null;
   aligned.catalogTitle = meta?.name || aligned.title || "";
+  if (aligned.type === "series") {
+    if (aligned.numberingAdjusted && parsed.season == null) {
+      // "Title - 105" may be the absolute number of the requested S05E03,
+      // not episode 105 of season 1. Undo the renumbering in that case.
+      const catalogAbsolute = absoluteEpisodeFromVideos(meta?.videos, aligned.catalogSeason, aligned.catalogEpisode);
+      if (catalogAbsolute && catalogAbsolute === parsed.episode) {
+        aligned = {
+          ...aligned,
+          season: aligned.catalogSeason,
+          episode: aligned.catalogEpisode,
+          absoluteEpisode: catalogAbsolute,
+          numberingAdjusted: false,
+          id: `tt${aligned.imdbId}:${aligned.catalogSeason}:${aligned.catalogEpisode}`
+        };
+      }
+    }
+    if (aligned.absoluteEpisode == null) {
+      const absolute = absoluteEpisodeFromVideos(meta?.videos, aligned.season, aligned.episode);
+      if (absolute) aligned.absoluteEpisode = absolute;
+    }
+  }
   const originalTitleMatches = Boolean(aligned.catalogTitle && titlesLikelyMatch(extra.filename, aligned.catalogTitle));
   const replacementImdbId = asImdbId(replacement?.id || replacement?.imdb_id);
   if (!originalTitleMatches && replacementImdbId) {

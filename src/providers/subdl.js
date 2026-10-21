@@ -1,6 +1,16 @@
+import { HttpError, limiterFor, safeFetch } from "../http.js";
+
+const API_HOSTS = ["api.subdl.com"];
+const DOWNLOAD_HOSTS = ["subdl.com"];
+const limiter = limiterFor("subdl", { minIntervalMs: 250, concurrency: 2 });
+
 function allowedDownloadUrl(value) {
-  const url = new URL(value, "https://dl.subdl.com");
-  return url.protocol === "https:" && (url.hostname === "subdl.com" || url.hostname.endsWith(".subdl.com"));
+  try {
+    const url = new URL(value, "https://dl.subdl.com");
+    return url.protocol === "https:" && (url.hostname === "subdl.com" || url.hostname.endsWith(".subdl.com"));
+  } catch {
+    return false;
+  }
 }
 
 function positiveNumber(value) {
@@ -21,6 +31,8 @@ function mapSubtitle(parent, file, catalogMatch, episodeScoped = false) {
     fileName: file.name || parent.name || `${release}.srt`,
     fileSize: positiveNumber(file.size || parent.size),
     release,
+    comment: String(parent.comment || "").slice(0, 300),
+    uploader: String(parent.author || "").slice(0, 80),
     language: "ar",
     hashMatch: false,
     catalogMatch,
@@ -46,14 +58,15 @@ export class SubDLProvider {
     this.config = config;
   }
 
-  async search(context) {
+  async search(context, _maxPages, { signal } = {}) {
     const common = {
       api_key: this.config.apiKey,
       type: context.media.type === "series" ? "tv" : "movie",
       languages: "AR",
       subs_per_page: "30",
       releases: "1",
-      hi: "1",
+      // Do not send hi=1: SubDL treats it as a filter and returns only
+      // hearing-impaired files (1 result instead of 30 for a popular film).
       unpack: "1",
       client: "stremio"
     };
@@ -67,28 +80,35 @@ export class SubDLProvider {
         params.set("episode_number", String(context.media.episode));
       }
     }
-    const candidates = [];
-    const payloads = await Promise.all(searches.map(async (params) => {
-      const response = await fetch(`${this.config.baseUrl}/subtitles?${params}`, {
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(12000)
-      });
-      if (response.status === 429) throw new Error("SubDL request quota has been reached");
-      if (!response.ok) throw new Error(`SubDL search failed with HTTP ${response.status}`);
-      const payload = await response.json();
-      if (payload.status === false) throw new Error(`SubDL search failed: ${payload.error || "unknown error"}`);
+    const settled = await Promise.allSettled(searches.map(async (params) => {
+      let response;
+      try {
+        response = await safeFetch(`${this.config.baseUrl}/subtitles?${params}`, {
+          allowedHosts: API_HOSTS,
+          headers: { Accept: "application/json" },
+          signal,
+          timeoutMs: 7000,
+          limiter,
+          label: "SubDL search",
+          maxBytes: 4 * 1024 * 1024
+        });
+      } catch (error) {
+        if (error instanceof HttpError && error.status === 429) throw new HttpError("SubDL request quota has been reached", { status: 429 });
+        if (error instanceof HttpError && error.status) throw new HttpError(`SubDL search failed with HTTP ${error.status}`, { status: error.status });
+        throw error;
+      }
+      const payload = response.json();
+      if (payload?.status === false) throw new Error(`SubDL search failed: ${payload.error || "unknown error"}`);
       return payload;
     }));
+    const payloads = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+    if (!payloads.length) throw settled[0].reason;
+    const candidates = [];
     for (const payload of payloads) {
       for (const subtitle of payload.subtitles || []) {
         const files = subtitle.unpack_files?.length ? subtitle.unpack_files : [subtitle];
         for (const file of files) {
-          const candidate = mapSubtitle(
-            subtitle,
-            file,
-            Boolean(context.media.imdbId),
-            context.media.type === "series"
-          );
+          const candidate = mapSubtitle(subtitle, file, Boolean(context.media.imdbId), context.media.type === "series");
           if (candidate) candidates.push(candidate);
         }
       }
@@ -96,24 +116,17 @@ export class SubDLProvider {
     return [...new Map(candidates.map((candidate) => [String(candidate.downloadRef), candidate])).values()];
   }
 
-  async download(ref) {
-    let current = new URL(String(ref), "https://dl.subdl.com").toString();
-    for (let redirects = 0; redirects <= 3; redirects += 1) {
-      if (!allowedDownloadUrl(current)) throw new Error("Blocked SubDL redirect host");
-      const response = await fetch(current, {
-        redirect: "manual",
-        headers: { "X-API-Key": this.config.apiKey },
-        signal: AbortSignal.timeout(15000)
-      });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        current = new URL(response.headers.get("location"), current).toString();
-        continue;
-      }
-      if (!response.ok) throw new Error(`SubDL download failed with HTTP ${response.status}`);
-      const size = Number(response.headers.get("content-length"));
-      if (size > 20 * 1024 * 1024) throw new Error("SubDL subtitle download is too large");
-      return { buffer: Buffer.from(await response.arrayBuffer()), fileName: "subtitle.zip" };
-    }
-    throw new Error("Too many SubDL redirects");
+  async download(ref, { signal } = {}) {
+    const url = new URL(String(ref), "https://dl.subdl.com").toString();
+    const response = await safeFetch(url, {
+      allowedHosts: DOWNLOAD_HOSTS,
+      headers: { "X-API-Key": this.config.apiKey },
+      signal,
+      timeoutMs: 12000,
+      limiter,
+      label: "SubDL download",
+      maxBytes: 20 * 1024 * 1024
+    });
+    return { buffer: response.buffer, fileName: "subtitle.zip" };
   }
 }

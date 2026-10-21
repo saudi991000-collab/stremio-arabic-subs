@@ -1,4 +1,8 @@
 import { normalizeName, parseReleaseName } from "../media.js";
+import { HttpError, limiterFor, safeFetch } from "../http.js";
+
+const HOSTS = ["arabicsubs.com"];
+const limiter = limiterFor("arabicsubs", { minIntervalMs: 250, concurrency: 2 });
 
 const IGNORED_MOVIE_TOKENS = new Set([
   "the", "a", "an", "and", "of", "in", "on", "to", "ar", "ara", "arabic", "srt", "ass", "ssa", "vtt",
@@ -24,11 +28,6 @@ function movieFilenameMatches(requested, candidate) {
   return shared.length >= Math.min(2, wantedTokens.length);
 }
 
-function allowedUrl(value) {
-  const url = new URL(value, "https://arabicsubs.com");
-  return url.protocol === "https:" && (url.hostname === "arabicsubs.com" || url.hostname.endsWith(".arabicsubs.com"));
-}
-
 export class ArabicSubsProvider {
   constructor(config) {
     this.id = "arabicsubs";
@@ -39,17 +38,27 @@ export class ArabicSubsProvider {
     return { Authorization: `Bearer ${this.config.apiKey}`, Accept: "application/json" };
   }
 
-  async search(context) {
+  async search(context, _maxPages, { signal } = {}) {
     if (!context.extra.filename) return [];
     const query = new URLSearchParams({ filename: context.extra.filename, limit: "25" });
-    const response = await fetch(`${this.config.baseUrl}/subtitles/match?${query}`, {
-      headers: this.headers(),
-      signal: AbortSignal.timeout(12000)
-    });
-    if (response.status === 429) throw new Error("ArabicSubs request quota has been reached");
-    if (!response.ok) throw new Error(`ArabicSubs search failed with HTTP ${response.status}`);
-    const payload = await response.json();
-    return (payload.matches || []).map((subtitle) => {
+    let response;
+    try {
+      response = await safeFetch(`${this.config.baseUrl}/subtitles/match?${query}`, {
+        allowedHosts: HOSTS,
+        headers: this.headers(),
+        signal,
+        timeoutMs: 7000,
+        limiter,
+        label: "ArabicSubs search",
+        maxBytes: 2 * 1024 * 1024
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 429) throw new HttpError("ArabicSubs request quota has been reached", { status: 429 });
+      if (error instanceof HttpError && error.status) throw new HttpError(`ArabicSubs search failed with HTTP ${error.status}`, { status: error.status });
+      throw error;
+    }
+    const payload = response.json();
+    return (payload?.matches || []).map((subtitle) => {
       const fileName = subtitle.originalFilename || `arabic-${subtitle.id}.srt`;
       const parsed = parseReleaseName(fileName);
       const declaredSeason = Number(subtitle.seasonNumber ?? subtitle.season ?? subtitle.episode?.seasonNumber) || undefined;
@@ -68,6 +77,7 @@ export class ArabicSubsProvider {
         downloadRef: subtitle.downloadUrl || `/subtitles/${subtitle.id}/download`,
         fileName,
         release: subtitle.releaseLabel || fileName,
+        uploader: String(subtitle.translator || subtitle.uploader || "").slice(0, 80),
         language: "ar",
         hashMatch: false,
         rating: Number(subtitle.rating) || 0,
@@ -81,20 +91,16 @@ export class ArabicSubsProvider {
     }).filter((candidate) => candidate?.fileId != null);
   }
 
-  async download(ref) {
-    let current = new URL(String(ref), this.config.baseUrl).toString();
-    for (let redirects = 0; redirects <= 3; redirects += 1) {
-      if (!allowedUrl(current)) throw new Error("Blocked ArabicSubs redirect host");
-      const response = await fetch(current, { headers: this.headers(), redirect: "manual", signal: AbortSignal.timeout(15000) });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        current = new URL(response.headers.get("location"), current).toString();
-        continue;
-      }
-      if (!response.ok) throw new Error(`ArabicSubs download failed with HTTP ${response.status}`);
-      const size = Number(response.headers.get("content-length"));
-      if (size > 20 * 1024 * 1024) throw new Error("ArabicSubs subtitle download is too large");
-      return { buffer: Buffer.from(await response.arrayBuffer()), fileName: "subtitle.srt" };
-    }
-    throw new Error("Too many ArabicSubs redirects");
+  async download(ref, { signal } = {}) {
+    const response = await safeFetch(new URL(String(ref), this.config.baseUrl).toString(), {
+      allowedHosts: HOSTS,
+      headers: this.headers(),
+      signal,
+      timeoutMs: 12000,
+      limiter,
+      label: "ArabicSubs download",
+      maxBytes: 20 * 1024 * 1024
+    });
+    return { buffer: response.buffer, fileName: "subtitle.srt" };
   }
 }

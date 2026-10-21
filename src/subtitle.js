@@ -1,7 +1,12 @@
 import { gunzipSync, inflateRawSync } from "node:zlib";
+import { looksLikeHtml } from "./quality.js";
 
 const MAX_SUBTITLE_BYTES = 12 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRY_BYTES = 32 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_BYTES = 128 * 1024 * 1024;
+const MAX_COMPRESSED_BYTES = 32 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = 500;
+const MAX_ARCHIVE_DEPTH = 1;
 const ARCHIVE_TEXT_FORMAT = /\.(srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/i;
 
 function stripAssAttachments(buffer, fileName) {
@@ -37,22 +42,51 @@ function archiveEntryScore(fileName, selector = {}) {
   return 0;
 }
 
-export function extractArchive(buffer, selector = {}) {
+// Entry names are only used for scoring; nothing is ever written to disk, so a
+// hostile name cannot escape a directory. Unsafe names are still ignored so a
+// crafted archive cannot smuggle a "subtitle" through path tricks (Zip Slip).
+export function safeArchiveEntryName(name) {
+  const value = String(name || "");
+  if (!value || value.length > 400 || /[\u0000-\u001f]/.test(value)) return false;
+  if (/^(?:[\\/]|[a-z]:)/i.test(value)) return false;
+  if (value.split(/[\\/]/).some((part) => part === ".." )) return false;
+  if (/(?:^|[\\/])__MACOSX[\\/]/i.test(value) || /(?:^|[\\/])\._/.test(value)) return false;
+  return !/[\\/]$/.test(value);
+}
+
+function preferredMovieEntry(options, selector) {
+  const hint = String(selector.fileName || "").toLowerCase().replace(/\.[a-z0-9]{2,4}$/, "");
+  return [...options].sort((a, b) => {
+    const english = (option) => Number(/(?:^|[^a-z])(?:eng|english|en)(?:[^a-z]|$)/i.test(option.fileName));
+    const arabic = (option) => Number(/(?:^|[^a-z])(?:ara|arabic|ar)(?:[^a-z]|$)|عرب/i.test(option.fileName));
+    const hinted = (option) => Number(Boolean(hint) && option.fileName.toLowerCase().includes(hint));
+    return arabic(b) - arabic(a) || english(a) - english(b) || hinted(b) - hinted(a) || b.uncompressedSize - a.uncompressedSize;
+  })[0];
+}
+
+export function extractArchive(buffer, selector = {}, depth = 0) {
   const hintedFileName = String(selector.fileName || "subtitle.srt");
-  if (buffer.length > 64 * 1024 * 1024) throw new Error("Compressed subtitle is too large");
+  if (buffer.length > MAX_COMPRESSED_BYTES) throw new Error("Compressed subtitle is too large");
   if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
     const result = gunzipSync(buffer, { maxOutputLength: MAX_ARCHIVE_ENTRY_BYTES });
-    return { buffer: result, fileName: hintedFileName.replace(/\.gz$/i, "") };
+    return { buffer: stripAssAttachments(result, hintedFileName), fileName: hintedFileName.replace(/\.gz$/i, "") };
   }
+  if (buffer.length >= 4 && buffer.subarray(0, 4).toString("latin1") === "Rar!") throw new Error("RAR subtitle archives are not supported");
+  if (buffer.length >= 6 && buffer[0] === 0x37 && buffer[1] === 0x7a && buffer[2] === 0xbc) throw new Error("7z subtitle archives are not supported");
   if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50) return { buffer, fileName: hintedFileName };
+  if (depth > MAX_ARCHIVE_DEPTH) throw new Error("Nested subtitle archives are too deep");
 
   const eocd = findEocd(buffer);
   if (eocd < 0) throw new Error("Invalid ZIP subtitle archive");
   const entries = buffer.readUInt16LE(eocd + 10);
+  if (entries > MAX_ARCHIVE_ENTRIES) throw new Error("ZIP contains too many files");
   let offset = buffer.readUInt32LE(eocd + 16);
   const options = [];
+  const nested = [];
+  let declaredTotal = 0;
   for (let index = 0; index < entries; index += 1) {
-    if (buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error("Invalid ZIP directory");
+    if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error("Invalid ZIP directory");
+    const flags = buffer.readUInt16LE(offset + 8);
     const method = buffer.readUInt16LE(offset + 10);
     const compressedSize = buffer.readUInt32LE(offset + 20);
     const uncompressedSize = buffer.readUInt32LE(offset + 24);
@@ -61,29 +95,52 @@ export function extractArchive(buffer, selector = {}) {
     const commentLength = buffer.readUInt16LE(offset + 32);
     const localOffset = buffer.readUInt32LE(offset + 42);
     const fileName = buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
-    if (ARCHIVE_TEXT_FORMAT.test(fileName)) options.push({ method, compressedSize, uncompressedSize, localOffset, fileName });
     offset += 46 + nameLength + extraLength + commentLength;
+    if (!safeArchiveEntryName(fileName) || (flags & 0x1)) continue;
+    const option = { method, compressedSize, uncompressedSize, localOffset, fileName };
+    if (ARCHIVE_TEXT_FORMAT.test(fileName)) {
+      declaredTotal += uncompressedSize;
+      options.push(option);
+    } else if (/\.zip$/i.test(fileName)) nested.push(option);
   }
-  let entry = options[0];
+  if (declaredTotal > MAX_ARCHIVE_TOTAL_BYTES) throw new Error("ZIP expands beyond the safe size limit");
+  if (!options.length && nested.length) {
+    // Some uploaders wrap a ZIP inside a ZIP. Allow exactly one more level.
+    for (const option of nested.slice(0, 3)) {
+      try {
+        return extractArchive(readZipEntry(buffer, option), selector, depth + 1);
+      } catch (error) {
+        if (/requested episode|too deep/i.test(error.message)) throw error;
+      }
+    }
+  }
+  let entry = options.length > 1 && !Number.isInteger(Number(selector.episode)) ? preferredMovieEntry(options, selector) : options[0];
   if (options.length > 1 && Number.isInteger(Number(selector.episode))) {
     const ranked = options
       .map((option) => ({ option, score: archiveEntryScore(option.fileName, selector) }))
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => b.score - a.score || a.option.fileName.localeCompare(b.option.fileName));
     if (ranked[0]?.score <= 0) throw new Error(`ZIP does not contain requested episode ${selector.episode}`);
     entry = ranked[0].option;
   }
   if (!entry) throw new Error("ZIP does not contain a supported subtitle");
+  const result = readZipEntry(buffer, entry);
+  return { buffer: stripAssAttachments(result, entry.fileName), fileName: entry.fileName.replace(/^.*[\\/]/, "") };
+}
+
+function readZipEntry(buffer, entry) {
   if (entry.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES || entry.uncompressedSize > Math.max(1, entry.compressedSize) * 300) {
     throw new Error("Unsafe ZIP compression ratio");
   }
-  if (buffer.readUInt32LE(entry.localOffset) !== 0x04034b50) throw new Error("Invalid ZIP local entry");
+  if (entry.localOffset + 30 > buffer.length || buffer.readUInt32LE(entry.localOffset) !== 0x04034b50) throw new Error("Invalid ZIP local entry");
   const localNameLength = buffer.readUInt16LE(entry.localOffset + 26);
   const localExtraLength = buffer.readUInt16LE(entry.localOffset + 28);
   const start = entry.localOffset + 30 + localNameLength + localExtraLength;
+  if (start + entry.compressedSize > buffer.length) throw new Error("Truncated ZIP entry");
   const compressed = buffer.subarray(start, start + entry.compressedSize);
-  const result = entry.method === 0 ? compressed : entry.method === 8 ? inflateRawSync(compressed, { maxOutputLength: MAX_ARCHIVE_ENTRY_BYTES }) : null;
+  const limit = Math.min(MAX_ARCHIVE_ENTRY_BYTES, Math.max(1024, entry.uncompressedSize * 2));
+  const result = entry.method === 0 ? compressed : entry.method === 8 ? inflateRawSync(compressed, { maxOutputLength: limit }) : null;
   if (!result) throw new Error("Unsupported ZIP compression method");
-  return { buffer: stripAssAttachments(result, entry.fileName), fileName: entry.fileName };
+  return result;
 }
 
 function scoreDecoded(text) {
@@ -95,6 +152,18 @@ function scoreDecoded(text) {
 
 export function decodeArabic(buffer, options = {}) {
   const requireArabic = options.requireArabic !== false;
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return { encoding: "utf-16le", text: new TextDecoder("utf-16le").decode(buffer.subarray(2)) };
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return { encoding: "utf-16be", text: new TextDecoder("utf-16be").decode(buffer.subarray(2)) };
+  }
+  // UTF-16 without a BOM: every other byte of ASCII timing lines is zero.
+  const sample = buffer.subarray(0, 512);
+  const zeroOdd = sample.filter((value, index) => index % 2 === 1 && value === 0).length;
+  const zeroEven = sample.filter((value, index) => index % 2 === 0 && value === 0).length;
+  if (sample.length >= 64 && zeroOdd > sample.length * 0.3) return { encoding: "utf-16le", text: new TextDecoder("utf-16le").decode(buffer) };
+  if (sample.length >= 64 && zeroEven > sample.length * 0.3) return { encoding: "utf-16be", text: new TextDecoder("utf-16be").decode(buffer) };
   // A valid UTF-8 Arabic file must win immediately. Decoding the same UTF-8
   // bytes as Windows-1256 often produces strings such as "ط§ظ„..." with
   // *more* Arabic code points, which fooled the old score-only detector.
@@ -134,9 +203,11 @@ export function analyzeSubtitle(text, options = {}) {
     const end = Number(match[5] || 0) * 3600 + Number(match[6]) * 60 + Number(match[7]) + Number(match[8]) / 1000;
     durationSeconds = Math.max(durationSeconds, end);
   }
-  const assTiming = /^Dialogue:\s*[^,]*,\s*\d+:(\d{2}):(\d{2})[.](\d{1,2}),\s*\d+:(\d{2}):(\d{2})[.](\d{1,2}),/gim;
+  const assTiming = /^Dialogue:\s*[^,]*,\s*\d+:\d{2}:\d{2}[.]\d{1,2},\s*(\d+):(\d{2}):(\d{2})[.](\d{1,2}),/gim;
   for (const match of text.matchAll(assTiming)) {
-    const end = Number(match[4]) * 60 + Number(match[5]) + Number(match[6].padEnd(2, "0")) / 100;
+    // Include the hour field: a 2-hour movie ASS used to look like a 59-minute
+    // episode and slipped past the series-duration check.
+    const end = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) + Number(match[4].padEnd(2, "0")) / 100;
     durationSeconds = Math.max(durationSeconds, end);
   }
   return { valid, arabicRatio, cueCount: arrowCues.length || assCues.length, durationSeconds };
@@ -317,7 +388,11 @@ function subToSrt(text, fpsHint) {
 }
 
 export function normalizeSubtitle(buffer, selector = {}) {
+  if (!buffer?.length) throw new Error("Downloaded subtitle is empty");
+  if (looksLikeHtml(buffer)) throw new Error("Provider returned an HTML or JSON error page instead of a subtitle");
   const extracted = extractArchive(buffer, selector);
+  if (looksLikeHtml(extracted.buffer)) throw new Error("Archive contains an HTML page instead of a subtitle");
+  if (extracted.buffer.length > MAX_SUBTITLE_BYTES) throw new Error("Subtitle file is too large");
   const requireArabic = selector.requireArabic !== false;
   const decoded = decodeArabic(extracted.buffer, { requireArabic });
   const hintedExtension = extracted.fileName.toLowerCase().match(/\.(srt|vtt|ass|ssa|smi|sami|sbv|ttml|dfxp|sub)$/)?.[1];
