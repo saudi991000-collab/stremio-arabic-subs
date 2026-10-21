@@ -109,6 +109,10 @@ export class MultiProvider {
     return snapshot.candidates;
   }
 
+  async warm() {
+    await Promise.allSettled(this.providers.map((provider) => provider.warm?.()));
+  }
+
   async download(item, options = {}) {
     const provider = this.byId.get(item.provider);
     if (!provider) throw new Error(`Unknown subtitle provider: ${item.provider}`);

@@ -102,12 +102,13 @@ test("aborts a provider at its own hard timeout and isolates its failure", async
 });
 
 test("slow providers are merged into the cache so the next open is complete and stable", async () => {
-  const provider = new MultiProvider([fakeProvider("fast", 3), fakeProvider("slow", 4, { delayMs: 1500 })], { providerTimeoutMs: 4000 });
-  await withServer(provider, {}, async (base, server) => {
+  // The slow provider answers after the 3 s listing deadline has passed.
+  const provider = new MultiProvider([fakeProvider("fast", 3), fakeProvider("slow", 4, { delayMs: 3500 })], { providerTimeoutMs: 6000 });
+  await withServer(provider, { LISTING_DEADLINE_MS: "3000" }, async (base, server) => {
     const first = await listing(base);
     assert.equal(first.subtitles.length, 3);
     assert.equal(first.cacheMaxAge, 0, "partial lists are not client-cached");
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 2500));
     await server.flushBackground();
     const second = await listing(base);
     assert.equal(second.subtitles.length, 7);

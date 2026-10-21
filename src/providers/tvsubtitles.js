@@ -67,6 +67,10 @@ export class TvSubtitlesProvider {
     return Promise.race([this.showsPromise, new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason || new Error("aborted")), { once: true }))]);
   }
 
+  async warm() {
+    await this.showList();
+  }
+
   async seriesTitle(context, signal) {
     if (context.media.catalogTitle || context.media.title) return context.media.catalogTitle || context.media.title;
     if (!context.media.imdbId) return "";

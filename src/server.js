@@ -494,6 +494,13 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     return work;
   }
 
+  // Load large provider indexes (archive listings, show lists) at start-up
+  // instead of inside the first listing, where parsing them on a small
+  // instance delayed every other provider.
+  setTimeout(() => {
+    actualProvider.warm?.().catch(() => null);
+  }, 1000).unref?.();
+
   // Warm local playback discovery outside subtitle-list requests. On Windows,
   // process discovery may take several seconds and must never make TV/mobile
   // clients abandon the first subtitle list.
@@ -591,7 +598,11 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const context = { media, extra };
         const cacheState = !entry ? "miss" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
         if (!entry) {
-          const searchBudget = Math.max(500, Math.min(config.providerSearchTimeoutMs, listingDeadline - Date.now() - 1500));
+          // First request for this video: finding candidates matters more
+          // than verifying them now (verification continues in the background
+          // and every link has download fallbacks). On a slow free instance a
+          // 5 s search budget returned only a handful of candidates.
+          const searchBudget = Math.max(500, Math.max(config.providerSearchTimeoutMs, listingDeadline - Date.now() - 1800));
           entry = await runSearch(key, context, searchBudget);
           if (!entry.complete) scheduleRefreshLater(key, context);
         } else if (cacheState === "stale") {

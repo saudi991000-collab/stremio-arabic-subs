@@ -59,6 +59,10 @@ export class MoraProvider {
     ]);
   }
 
+  async warm() {
+    await this.files();
+  }
+
   async search(context, _maxPages, { signal } = {}) {
     const wantedTitle = titleFor(context);
     if (!wantedTitle) return [];
