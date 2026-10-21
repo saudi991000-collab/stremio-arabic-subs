@@ -173,9 +173,14 @@ export function mergeSearchEntries(previous, snapshot, expectedProviders = []) {
       providers[id] = { ...old, lastFailure: status.status, lastFailureAt: status.at };
     }
   }
-  const candidates = [...byProvider.values()].flat()
-    .filter((candidate, index, all) => all.findIndex((item) => candidateKey(item) === candidateKey(candidate)) === index)
-    .sort((a, b) => candidateKey(a).localeCompare(candidateKey(b)));
+  // Single pass: the previous findIndex() dedupe was quadratic and cost
+  // seconds of CPU per listing on a small instance with ~800 candidates.
+  const unique = new Map();
+  for (const candidate of [...byProvider.values()].flat()) {
+    const key = candidateKey(candidate);
+    if (!unique.has(key)) unique.set(key, candidate);
+  }
+  const candidates = [...unique.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([, candidate]) => candidate);
   const expected = expectedProviders.length ? expectedProviders : Object.keys(providers);
   const complete = expected.every((id) => {
     const status = providers[id]?.status;

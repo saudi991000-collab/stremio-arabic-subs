@@ -42,6 +42,10 @@ export function readConfig(env = process.env) {
     // than MAX_RESULTS when time allows.
     deepAnalysisCandidates: int(env.DEEP_ANALYSIS_CANDIDATES, 35, 0, 60),
     deepAnalysisTimeoutMs: int(env.DEEP_ANALYSIS_TIMEOUT_MS, 6500, 500, 30000),
+    // Of those, how many may be newly downloaded and parsed while Stremio
+    // waits. Parsing is CPU-bound; Render's free instance has a fraction of a
+    // CPU, so a large value delays the whole response.
+    listingDownloads: int(env.LISTING_DOWNLOADS, 6, 0, 60),
     // Total time a listing may take before Stremio is answered. Stremio
     // clients abandon slow subtitle requests, so this is capped at 12 s.
     listingDeadlineMs,

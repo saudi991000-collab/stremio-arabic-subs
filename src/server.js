@@ -658,6 +658,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         if (analysisBudget >= 500) {
           ranked = await deepAnalyzeCandidates(preliminary, context, actualProvider, actualCache, {
             limit: config.deepAnalysisCandidates,
+            // New downloads inside the request; the rest are validated in the
+            // background and reused from the verdict store next time.
+            maxDownloads: config.listingDownloads,
             timeoutMs: analysisBudget,
             reference: localReference,
             verdicts: verdictStore,

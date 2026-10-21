@@ -266,6 +266,7 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
   const preferences = options.preferences || {};
   const results = new Array(selected.length);
   let cursor = 0;
+  let downloadsStarted = 0;
   const workers = Array.from({ length: Math.min(options.concurrency || 10, selected.length) }, async () => {
     while (cursor < selected.length) {
       const index = cursor;
@@ -289,6 +290,15 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
       try {
         let inspected = null;
         const needsDownload = !remembered || (reference && options.syncWithReference !== false);
+        // Downloading and parsing is CPU-heavy; inside a listing only a few
+        // new files are inspected. Already-verified files cost nothing.
+        if (needsDownload && Number.isFinite(options.maxDownloads)) {
+          if (downloadsStarted >= options.maxDownloads) {
+            results[index] = { ...candidate, deepAnalyzed: false, validationPending: true };
+            continue;
+          }
+          downloadsStarted += 1;
+        }
         if (needsDownload) {
           inspected = await within(loadNormalized(candidate, context, provider, cache, { signal: controller.signal }), deadline - Date.now());
         }
