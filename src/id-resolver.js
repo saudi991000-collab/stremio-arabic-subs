@@ -141,7 +141,7 @@ export async function resolveVideoId(type, id, options = {}) {
   if (/^tt\d+(?::\d+:\d+)?$/i.test(String(id))) return parseVideoId(type, id);
   const key = `${type}:${id}`;
   const cached = cache.get(key);
-  if (cached && Date.now() - cached.at < (cached.value.imdbId ? 24 * 60 * 60 * 1000 : 5 * 60 * 1000)) return cached.value;
+  if (cached && Date.now() - cached.at < (cached.value.imdbId ? 24 * 60 * 60 * 1000 : 60 * 1000)) return cached.value;
   let value;
   const fetchImpl = options.fetchImpl || fetch;
   if (/^kitsu:/i.test(String(id))) {

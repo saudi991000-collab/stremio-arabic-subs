@@ -123,7 +123,10 @@ test("results survive a restart (persistent cache) even when providers then fail
   assert.equal(before.subtitles.length, 9);
   const failing = new MultiProvider([fakeProvider("a", 0, { fail: new Error("cold start timeout") }), fakeProvider("b", 0, { fail: new Error("down") })]);
   const after = await withServer(failing, { CACHE_DIRECTORY: directory }, async (base) => listing(base));
-  assert.deepEqual(after.subtitles.map((item) => item.label), before.subtitles.map((item) => item.label));
+  // The same subtitles survive the restart. Their order may move once as
+  // more of them finish verification (verified files rank first).
+  const names = (value) => value.subtitles.map((item) => item.label.replace(/^\d+\s*/, "")).sort();
+  assert.deepEqual(names(after), names(before));
 });
 
 test("returns up to 25 valid results and never pads the list", async () => {
