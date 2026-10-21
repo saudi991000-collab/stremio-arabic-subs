@@ -1,4 +1,8 @@
+import { fileNameFromDisposition, limiterFor, safeFetch } from "../http.js";
+
 const DEFAULT_BASE = "https://www.subkong.com";
+const HOSTS = ["subkong.com"];
+const limiter = limiterFor("subkong", { minIntervalMs: 250, concurrency: 2 });
 
 function rowsOf(payload) {
   return Array.isArray(payload?.subtitles) ? payload.subtitles : [];
@@ -24,7 +28,7 @@ export class SubKongProvider {
     this.config = { baseUrl: DEFAULT_BASE, ...config };
   }
 
-  async search(context) {
+  async search(context, _maxPages, { signal } = {}) {
     if (!context.media.imdbId) return [];
     const params = new URLSearchParams({
       imdb_id: `tt${context.media.imdbId}`,
@@ -34,13 +38,16 @@ export class SubKongProvider {
       params.set("season", String(context.media.season));
       params.set("episode", String(context.media.episode));
     }
-    const response = await fetch(`${this.config.baseUrl}/api/v1/subtitles?${params}`, {
+    const response = await safeFetch(`${this.config.baseUrl}/api/v1/subtitles?${params}`, {
+      allowedHosts: HOSTS,
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(9000)
+      signal,
+      timeoutMs: 7000,
+      limiter,
+      label: "SubKong search",
+      maxBytes: 4 * 1024 * 1024
     });
-    if (!response.ok) throw new Error(`SubKong search failed with HTTP ${response.status}`);
-    const payload = await response.json();
-    return rowsOf(payload).map((row, index) => {
+    return rowsOf(response.json()).map((row, index) => {
       if (!row?.download || !safePath(row.download)) return null;
       const format = formatOf(row);
       const release = row.MovieReleaseName || row.name || `subkong-${index + 1}`;
@@ -59,8 +66,8 @@ export class SubKongProvider {
         downloadCount: Number(row.downloads) || 0,
         fromTrusted: source === "user",
         hearingImpaired: false,
-        aiTranslated: false,
-        machineTranslated: false,
+        aiTranslated: /^(?:ai|machine|auto)\b/i.test(source),
+        machineTranslated: /^(?:machine|auto)\b/i.test(source),
         featureDetails: {
           year: Number(row.MovieYear) || undefined,
           seasonNumber: context.media.type === "series" ? context.media.season : undefined,
@@ -70,22 +77,15 @@ export class SubKongProvider {
     }).filter(Boolean);
   }
 
-  async download(ref) {
-    let current = String(ref);
-    for (let redirects = 0; redirects <= 3; redirects += 1) {
-      if (!safePath(current)) throw new Error("Blocked SubKong download host");
-      const response = await fetch(current, { redirect: "manual", signal: AbortSignal.timeout(18000) });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        current = new URL(response.headers.get("location"), current).toString();
-        continue;
-      }
-      if (!response.ok) throw new Error(`SubKong download failed with HTTP ${response.status}`);
-      const size = Number(response.headers.get("content-length"));
-      if (size > 64 * 1024 * 1024) throw new Error("SubKong subtitle download is too large");
-      const disposition = response.headers.get("content-disposition") || "";
-      const fileName = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1] || "subtitle.zip";
-      return { buffer: Buffer.from(await response.arrayBuffer()), fileName: decodeURIComponent(fileName) };
-    }
-    throw new Error("Too many SubKong redirects");
+  async download(ref, { signal } = {}) {
+    const response = await safeFetch(String(ref), {
+      allowedHosts: HOSTS,
+      signal,
+      timeoutMs: 15000,
+      limiter,
+      label: "SubKong download",
+      maxBytes: 32 * 1024 * 1024
+    });
+    return { buffer: response.buffer, fileName: fileNameFromDisposition(response.headers, "subtitle.zip") };
   }
 }

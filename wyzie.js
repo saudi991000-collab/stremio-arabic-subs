@@ -1,5 +1,9 @@
+import { HttpError, fileNameFromDisposition, limiterFor, safeFetch } from "../http.js";
+
 const DOWNLOAD_HOST = "sub.wyzie.io";
+const HOSTS = [DOWNLOAD_HOST];
 const NATIVE_FORMATS = new Set(["srt", "vtt", "ass", "ssa"]);
+const limiter = limiterFor("wyzie", { minIntervalMs: 200, concurrency: 3 });
 
 function rowsOf(payload) {
   if (Array.isArray(payload)) return payload;
@@ -32,7 +36,7 @@ function mappedFormat(row) {
 
 function mapRow(row, context) {
   if (!row?.url || !safeDownloadUrl(row.url)) return null;
-  if (row.ai === true) return null;
+  if (row.ai === true || /^(?:ai|machine|auto)/i.test(String(row.source || ""))) return null;
   if (row.language && String(row.language).toLowerCase() !== "ar") return null;
   const originalFormat = String(row.format || "srt").toLowerCase();
   const format = mappedFormat(row);
@@ -45,6 +49,7 @@ function mapRow(row, context) {
     downloadRef: ref,
     fileName,
     release,
+    origin: String(row.source || "").slice(0, 40),
     language: "ar",
     hashMatch: false,
     catalogMatch: true,
@@ -68,7 +73,7 @@ export class WyzieProvider {
     this.config = config;
   }
 
-  async search(context) {
+  async search(context, _maxPages, { signal } = {}) {
     if (!this.config.apiKey || !context.media.imdbId) return [];
     const params = new URLSearchParams({
       id: `tt${context.media.imdbId}`,
@@ -81,34 +86,37 @@ export class WyzieProvider {
       params.set("season", String(context.media.season));
       params.set("episode", String(context.media.episode));
     }
-    const response = await fetch(`${this.config.baseUrl}/search?${params}`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(12000)
-    });
-    if (response.status === 429) throw new Error("Wyzie daily request limit has been reached");
-    if (response.status === 402) throw new Error("Wyzie paid request balance has been reached");
+    let response;
+    try {
+      response = await safeFetch(`${this.config.baseUrl}/search?${params}`, {
+        allowedHosts: HOSTS,
+        headers: { Accept: "application/json" },
+        signal,
+        timeoutMs: 8000,
+        limiter,
+        label: "Wyzie search",
+        maxBytes: 4 * 1024 * 1024,
+        okStatuses: [400]
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 429) throw new HttpError("Wyzie daily request limit has been reached", { status: 429 });
+      if (error instanceof HttpError && error.status === 402) throw new HttpError("Wyzie paid request balance has been reached", { status: 402 });
+      if (error instanceof HttpError && error.status) throw new HttpError(`Wyzie search failed with HTTP ${error.status}`, { status: error.status });
+      throw error;
+    }
     if (response.status === 400) return [];
-    if (!response.ok) throw new Error(`Wyzie search failed with HTTP ${response.status}`);
-    const payload = await response.json();
-    return rowsOf(payload).map((row) => mapRow(row, context)).filter(Boolean);
+    return rowsOf(response.json()).map((row) => mapRow(row, context)).filter(Boolean);
   }
 
-  async download(ref) {
-    let current = String(ref);
-    for (let redirects = 0; redirects <= 3; redirects += 1) {
-      if (!safeDownloadUrl(current)) throw new Error("Blocked Wyzie subtitle URL");
-      const response = await fetch(current, { redirect: "manual", signal: AbortSignal.timeout(15000) });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        current = new URL(response.headers.get("location"), current).toString();
-        continue;
-      }
-      if (!response.ok) throw new Error(`Wyzie subtitle download failed with HTTP ${response.status}`);
-      const size = Number(response.headers.get("content-length"));
-      if (size > 20 * 1024 * 1024) throw new Error("Wyzie subtitle is too large");
-      const disposition = response.headers.get("content-disposition") || "";
-      const fileName = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1] || "subtitle.srt";
-      return { buffer: Buffer.from(await response.arrayBuffer()), fileName: decodeURIComponent(fileName) };
-    }
-    throw new Error("Too many subtitle redirects");
+  async download(ref, { signal } = {}) {
+    const response = await safeFetch(String(ref), {
+      allowedHosts: HOSTS,
+      signal,
+      timeoutMs: 12000,
+      limiter,
+      label: "Wyzie subtitle download",
+      maxBytes: 20 * 1024 * 1024
+    });
+    return { buffer: response.buffer, fileName: fileNameFromDisposition(response.headers, "subtitle.srt") };
   }
 }

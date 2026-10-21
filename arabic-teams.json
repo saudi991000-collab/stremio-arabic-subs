@@ -1,0 +1,17 @@
+{
+  "_comment": "Recognised Arabic translation teams. 'aliases' are matched as whole words, case-insensitively, after separators (. _ - space) are normalised. Add a team here; no code change is needed. 'providers' marks a source whose every file comes from that team.",
+  "teams": [
+    { "name": "3ASQ", "aliases": ["3asq"] },
+    { "name": "Memories", "aliases": ["memories", "memories fansub", "memories subs"] },
+    { "name": "ESPADAS", "aliases": ["espadas"] },
+    { "name": "DAC Subs", "aliases": ["dac subs", "dac sub", "dacsubs"] },
+    { "name": "Asahi Fansubs", "aliases": ["asahi fansubs", "asahi fansub", "asahifansubs"] },
+    { "name": "Arabic Anime Team", "aliases": ["arabic anime team", "arabicanimeteam"] },
+    { "name": "Kaizen", "aliases": ["kaizen"] },
+    { "name": "Aboody Subs", "aliases": ["aboody subs", "abody subs", "aboodysubs", "aboody sub"] },
+    { "name": "Al-Amri Fansubs", "aliases": ["al amri fansubs", "al amri fansub", "alamri fansubs"] },
+    { "name": "ALanime Fansub", "aliases": ["alanime fansub", "alanime fansubs", "alanimefansub"] },
+    { "name": "Mirai Subs", "aliases": ["mirai subs", "mirai sub", "mirai fansub", "mirai fansubs"] },
+    { "name": "Mirai Fansubs", "aliases": [], "providers": ["miraianime"] }
+  ]
+}

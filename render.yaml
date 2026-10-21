@@ -27,6 +27,10 @@ services:
         sync: false
       - key: WYZIE_API_KEY
         sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
       - key: RESULT_MODE
         value: top20
       - key: MAX_RESULTS
@@ -34,12 +38,16 @@ services:
       - key: MIN_CONFIDENCE
         value: "70"
       - key: DOWNLOAD_FALLBACKS
-        value: "6"
+        value: "5"
       - key: VALIDATE_BEFORE_LISTING
         value: "true"
       - key: DEEP_ANALYSIS_CANDIDATES
-        value: "25"
+        value: "35"
       - key: MAX_SEARCH_PAGES
-        value: "4"
+        value: "3"
+      - key: LISTING_DEADLINE_MS
+        value: "10000"
+      - key: PROVIDER_SEARCH_TIMEOUT_MS
+        value: "5000"
       - key: COMPANION_WAIT_MS
         value: "0"
