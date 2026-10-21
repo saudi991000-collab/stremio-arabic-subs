@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { readConfig } from "./config.js";
 import { logger } from "./logger.js";
 import { manifest } from "./manifest.js";
@@ -389,6 +390,11 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   });
   await actualCache.init();
   const backgroundTasks = new Set();
+  // Listings currently being answered; background validation waits while > 0.
+  let activeListings = 0;
+  // Event-loop delay shows whether the instance's CPU is saturated.
+  const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  loopDelay.enable();
   const refreshes = new Map();
   const validations = new Map();
   const storeLocks = new Map();
@@ -487,7 +493,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         preferences,
         loadReference: false,
         syncWithReference: false,
-        concurrency: 4,
+        concurrency: 2,
+        shouldPause: () => activeListings > 0,
         maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
       });
     }).finally(() => validations.delete(key)));
@@ -517,6 +524,19 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     let url;
     try {
       url = new URL(request.url, "http://localhost");
+      if (url.pathname.startsWith("/subtitles/") || url.pathname.startsWith("/subtitle/")) {
+        activeListings += 1;
+        if (activeListings === 1) loopDelay.reset();
+        let released = false;
+        const release = () => {
+          if (!released) {
+            released = true;
+            activeListings -= 1;
+          }
+        };
+        response.once("finish", release);
+        response.once("close", release);
+      }
       const companionRoute = url.pathname.startsWith("/companion/");
       if (request.method === "OPTIONS") {
         if (companionRoute) {
@@ -716,7 +736,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const cacheMaxAge = entry.complete ? 300 : 0;
         // Counts only (no ids, keys or names): lets the owner see why a list
         // is short without access to the hosting logs.
-        const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started}`;
+        const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)}`;
         return json(response, 200, { subtitles, cacheMaxAge }, { "Cache-Control": "no-store", "X-Listing-Status": status });
       }
 

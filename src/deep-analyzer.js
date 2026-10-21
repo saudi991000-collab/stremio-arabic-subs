@@ -271,6 +271,12 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
       const index = cursor;
       cursor += 1;
       const candidate = selected[index];
+      // Background runs step aside while a user is waiting for a listing: on
+      // a fraction-of-a-CPU instance, parsing subtitles here starved the
+      // event loop and the user's provider searches never completed.
+      while (options.shouldPause?.() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
       if (Date.now() >= deadline) {
         results[index] = { ...candidate, deepAnalyzed: false, validationPending: true };
         continue;
@@ -309,6 +315,8 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
         let analyzed = applyVerdict(candidate, verdict);
         if (inspected) analyzed = applyTiming(analyzed, inspected, reference);
         results[index] = finalize(analyzed);
+        // Let pending network I/O run between CPU-heavy files in background mode.
+        if (options.shouldPause) await new Promise((resolve) => setTimeout(resolve, 25));
       } catch (error) {
         if (isTransientError(error) || controller.signal.aborted) {
           results[index] = { ...candidate, deepAnalyzed: false, validationPending: true };
