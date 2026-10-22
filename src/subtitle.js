@@ -233,7 +233,82 @@ function splitAssFields(value, count) {
   return fields;
 }
 
+// ASS colours are &HAABBGGRR (or &HBBGGRR& inline); SRT wants #RRGGBB.
+function assColor(value) {
+  const hex = String(value || "").replace(/[&h]/gi, "").trim();
+  if (!/^[0-9a-f]{1,8}$/i.test(hex)) return null;
+  const bgr = hex.padStart(8, "0").slice(-6);
+  return `#${bgr.slice(4, 6)}${bgr.slice(2, 4)}${bgr.slice(0, 2)}`.toUpperCase();
+}
+
+function assStyles(text) {
+  const styles = new Map();
+  let inStyles = false;
+  let format = [];
+  const legacy = /ScriptType:\s*v4\.00\s*$/im.test(text);
+  for (const line of String(text).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (/^\[V4\+? Styles\]$/i.test(trimmed)) {
+      inStyles = true;
+      continue;
+    }
+    if (/^\[.+\]$/.test(trimmed)) {
+      inStyles = false;
+      continue;
+    }
+    if (!inStyles) continue;
+    if (/^Format:/i.test(trimmed)) {
+      format = trimmed.slice(trimmed.indexOf(":") + 1).split(",").map((field) => field.trim().toLowerCase());
+      continue;
+    }
+    if (!/^Style:/i.test(trimmed) || !format.length) continue;
+    const fields = trimmed.slice(trimmed.indexOf(":") + 1).split(",").map((field) => field.trim());
+    const get = (name) => fields[format.indexOf(name)];
+    let alignment = Number(get("alignment")) || 2;
+    // SSA v4 numbers alignment 1-3 bottom, 5-7 top, 9-11 middle.
+    if (legacy) alignment = alignment >= 9 ? alignment - 5 : alignment >= 5 ? alignment + 2 : alignment;
+    styles.set(String(get("name") || "").toLowerCase(), {
+      color: assColor(get("primarycolour")),
+      bold: /^-?1$/.test(get("bold") || ""),
+      italic: /^-?1$/.test(get("italic") || ""),
+      alignment
+    });
+  }
+  return styles;
+}
+
+function styledCueText(rawText, base) {
+  let state = { ...base };
+  let alignment = base.alignment;
+  let output = "";
+  for (const part of String(rawText).split(/(\{[^}]*\})/)) {
+    if (!part) continue;
+    if (part.startsWith("{")) {
+      for (const match of part.matchAll(/\\(?:(1?c)(&H[0-9a-f]+&?)|(i)([01])|(b)(\d+)|(an)([1-9])|(r)([^\\}]*))/gi)) {
+        if (match[1]) state.color = assColor(match[2]);
+        else if (match[3]) state.italic = match[4] === "1";
+        else if (match[5]) state.bold = Number(match[6]) === 1 || Number(match[6]) >= 700;
+        else if (match[7]) alignment = Number(match[8]);
+        else if (match[9]) state = { ...base };
+      }
+      continue;
+    }
+    let segment = part.replace(/\\[Nn]/g, "\n").replace(/\\h/g, " ");
+    if (!segment) continue;
+    if (state.italic) segment = `<i>${segment}</i>`;
+    if (state.bold) segment = `<b>${segment}</b>`;
+    if (state.color && state.color !== "#FFFFFF") segment = `<font color="${state.color}">${segment}</font>`;
+    output += segment;
+  }
+  output = output.split("\n").map((line) => line.trim()).filter(Boolean).join("\n");
+  return alignment && alignment !== 2 ? `{\\an${alignment}}${output}` : output;
+}
+
+// Converts ASS/SSA dialogue to SRT. Colours, italics, bold and screen
+// position survive as <font color>, <i>, <b> and {\anN}, which mpv, VLC,
+// ExoPlayer (Android TV) and AVPlayer (iPad) understand in SRT files.
 export function assToSrt(text) {
+  const styles = assStyles(text);
   let inEvents = false;
   let format = ["Layer", "Start", "End", "Style", "Name", "MarginL", "MarginR", "MarginV", "Effect", "Text"];
   const cues = [];
@@ -257,16 +332,17 @@ export function assToSrt(text) {
     const start = assTimestamp(fields[format.findIndex((field) => /^start$/i.test(field))]);
     const end = assTimestamp(fields[format.findIndex((field) => /^end$/i.test(field))]);
     const rawText = fields[format.findIndex((field) => /^text$/i.test(field))] || "";
-    const cueText = rawText
-      .replace(/\{[^}]*\}/g, "")
-      .replace(/\\[Nn]/g, "\n")
-      .replace(/\\h/g, " ")
-      .trim();
-    if (!start || !end || !/[\u0600-\u06ff]/.test(cueText)) continue;
-    cues.push(`${cues.length + 1}\n${start} --> ${end}\n${cueText}`);
+    // Vector drawings (\p1) are shapes, not text.
+    if (/\\p[1-9]/.test(rawText)) continue;
+    const plain = rawText.replace(/\{[^}]*\}/g, "").replace(/\\[Nn]/g, "\n").replace(/\\h/g, " ").trim();
+    if (!start || !end || !/[؀-ۿ]/.test(plain)) continue;
+    const style = styles.get(String(fields[format.findIndex((field) => /^style$/i.test(field))] || "").trim().toLowerCase()) || { alignment: 2 };
+    cues.push({ start, end, text: styledCueText(rawText, style) || plain });
   }
   if (!cues.length) throw new Error("ASS subtitle does not contain Arabic dialogue cues");
-  return `${cues.join("\n\n")}\n`;
+  // ASS events are not required to be in time order; SRT players expect it.
+  cues.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  return `${cues.map((cue, index) => `${index + 1}\n${cue.start} --> ${cue.end}\n${cue.text}`).join("\n\n")}\n`;
 }
 
 function srtBlocks(text) {

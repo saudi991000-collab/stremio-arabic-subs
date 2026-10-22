@@ -47,7 +47,13 @@ const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const embeddedConfigurePage = `<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ترجمة النخبة</title><style>body{margin:0;background:#0d0b18;color:#fff;font-family:system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:620px;margin:24px;padding:34px;border:1px solid #7c5cff;border-radius:22px;background:#171328;text-align:center}h1{margin-top:0}p{color:#cbc5df;line-height:1.8}.button{display:inline-block;margin:10px;padding:14px 24px;border-radius:14px;background:#7c5cff;color:white;text-decoration:none;font-weight:700}.url{direction:ltr;word-break:break-all;background:#0b0912;padding:12px;border-radius:10px}</style></head>
-<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 25 ترجمة عربية بشرية مرتبة، مع دعم صيغ الترجمة النصية وتحويلها تلقائياً إلى صيغة متوافقة مع Stremio.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div><p>الإصدار {{VERSION}}</p></main></body></html>`;
+<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 25 ترجمة عربية بشرية مرتبة، مع دعم صيغ الترجمة النصية وتحويلها تلقائياً إلى صيغة متوافقة مع Stremio.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><a class="button" href="{{SRT_STREMIO_URL}}">تثبيت نسخة SRT (تلفزيون/آيباد)</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div><p>الإصدار {{VERSION}}</p></main></body></html>`;
+
+const srtManifest = {
+  ...manifest,
+  name: `${manifest.name} (SRT)`,
+  description: `${manifest.description} نسخة SRT: كل الترجمات بصيغة SRT لأجهزة التلفزيون والآيباد.`
+};
 
 const SECURITY_HEADERS = { "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" };
 
@@ -524,6 +530,14 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     let url;
     try {
       url = new URL(request.url, "http://localhost");
+      // "/srt/..." is the same add-on with every subtitle delivered as SRT.
+      // Android TV / iPad players time ASS files differently from desktop
+      // (subtitles appeared after the speech on a Mi Box while SRT was exact).
+      let srtOnly = false;
+      if (url.pathname === "/srt" || url.pathname.startsWith("/srt/")) {
+        srtOnly = true;
+        url.pathname = url.pathname.slice(4) || "/";
+      }
       if (url.pathname.startsWith("/subtitles/") || url.pathname.startsWith("/subtitle/")) {
         activeListings += 1;
         if (activeListings === 1) loopDelay.reset();
@@ -587,11 +601,14 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           persistentCache: remote ? "upstash" : "disk"
         });
       }
-      if (url.pathname === "/manifest.json") return json(response, 200, manifest);
+      if (url.pathname === "/manifest.json") return json(response, 200, srtOnly ? srtManifest : manifest);
       if (url.pathname === "/" || url.pathname === "/configure") {
         const template = await readFile(path.join(moduleDirectory, "../public/configure.html"), "utf8").catch(() => embeddedConfigurePage);
         const manifestUrl = `${baseUrl(request, config)}/manifest.json`;
+        const srtManifestUrl = `${baseUrl(request, config)}/srt/manifest.json`;
         return html(response, 200, template
+          .replaceAll("{{SRT_MANIFEST_URL}}", escapeHtml(srtManifestUrl))
+          .replaceAll("{{SRT_STREMIO_URL}}", escapeHtml(srtManifestUrl.replace(/^https?:/, "stremio:")))
           .replaceAll("{{MANIFEST_URL}}", escapeHtml(manifestUrl))
           .replaceAll("{{STREMIO_URL}}", escapeHtml(manifestUrl.replace(/^https?:/, "stremio:")))
           .replaceAll("{{VERSION}}", escapeHtml(manifest.version)));
@@ -677,7 +694,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         // its files; listing them only produces "Failed to load" in Stremio.
         const unavailable = (candidate) => Boolean(actualProvider.byId?.get(candidate.provider)?.isQuotaExhausted?.());
         const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed && !unavailable(candidate)), companionSession?.duration);
-        const eligible = requireVerifiedDownload
+        let eligible = requireVerifiedDownload
           ? [
             ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
             ...usable.filter((candidate) => candidate.deepAnalyzed !== true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch"))
@@ -686,6 +703,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
             ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
           ];
+        // SRT mode: the same subtitles, converted on delivery to SRT that keeps
+        // colours, italics/bold and top/bottom position (<font color>, {anN}),
+        // which Android TV and iPad players render with correct timing.
+        if (srtOnly) eligible = eligible.map((candidate) => ({ ...candidate, actualFormat: "srt" }));
         const displayRanked = sortForDisplay(eligible);
         const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
         const selected = sortForDisplay(diverse);

@@ -128,3 +128,34 @@ test("rejects an implausibly long series subtitle and uses a sane fallback", asy
     assert.match(await response.text(), /الحلقة الصحيحة/);
   });
 });
+
+test("the /srt/ variant lists and serves every subtitle as SRT for TV and tablet players", async () => {
+  const ass = Buffer.from(arabicAss(40, { styled: true }));
+  const provider = {
+    async search() {
+      return [{ fileId: 30, fileName: "Anime.S01E07.Styled.ass", language: "ar", featureDetails: { seasonNumber: 1, episodeNumber: 7 } }];
+    },
+    async download() {
+      return { buffer: ass, fileName: "Anime.S01E07.Styled.ass" };
+    }
+  };
+  await withServer(provider, async (base) => {
+    const manifest = await (await fetch(`${base}/srt/manifest.json`)).json();
+    assert.equal(manifest.id, "org.arabic.elitesubs.v3");
+    assert.match(manifest.name, /SRT/);
+    const normal = await (await fetch(`${base}/subtitles/series/tt1234567:1:7/filename=Anime.S01E07.mkv.json`)).json();
+    assert.match(normal.subtitles[0].url, /\.ass$/);
+    const listing = await (await fetch(`${base}/srt/subtitles/series/tt1234567:1:7/filename=Anime.S01E07.mkv.json`)).json();
+    assert.match(listing.subtitles[0].url, /\.srt$/);
+    assert.match(listing.subtitles[0].label, /• SRT •/);
+    const response = await fetch(listing.subtitles[0].url);
+    assert.match(response.headers.get("content-type"), /subrip/);
+    const body = await response.text();
+    assert.match(body, /^1\n\d\d:\d\d:\d\d,\d{3} --> /);
+    assert.doesNotMatch(body, /\[Script Info\]|Dialogue:/);
+    // Colours and the top-of-screen position survive the conversion.
+    assert.match(body, /\{\\an8\}<font color="#FFFF00">/);
+    const page = await (await fetch(`${base}/configure`)).text();
+    assert.match(page, /\/srt\/manifest\.json/);
+  });
+});
