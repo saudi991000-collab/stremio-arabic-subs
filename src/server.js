@@ -659,7 +659,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         if (videoId.length > 200) throw new Error("Video id is too long");
         const extra = parseExtra(decodeURIComponent(encodedExtra));
         const key = searchKey(type, videoId, extra);
+        const marks = [];
+        const mark = (name) => marks.push(`${name}:${Date.now() - started}`);
         let entry = await searchStore.get(key);
+        mark("get");
         // Entries saved by older versions for a Kitsu id that was never mapped
         // to IMDb are empty by construction; ignore them and resolve again.
         if (entry && identityUnresolved(entry.media)) entry = undefined;
@@ -685,6 +688,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           const resolvedMedia = await resolveVideoId(type, videoId);
           media = await alignMediaToFilename(resolvedMedia, extra);
         }
+        mark("media");
         const context = { media, extra };
         const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
         if (!entry) {
@@ -706,7 +710,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         }
         const candidates = entry.candidates;
         logger.info("subtitle listing search ready", { requestId, candidates: candidates.length, cache: cacheState, complete: entry.complete, elapsedMs: Date.now() - started });
+        mark("search");
         let ranked = rankCandidates(candidates, context, config);
+        mark("rank");
         const fallbackConfidence = Math.max(45, config.minConfidence - 25);
         const preliminary = ranked.filter((candidate) =>
           candidate.confidence >= fallbackConfidence && !candidate.reasons?.includes("season-pack")
@@ -748,6 +754,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         } else {
           ranked = preliminary;
         }
+        mark("deep");
         if (ranked.some((candidate) => !candidate.deepAnalyzed)) scheduleValidation(key, entry, context);
         const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
         // A provider whose daily download quota is used up cannot deliver
@@ -801,6 +808,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             label
           };
         });
+        mark("build");
         logger.info("subtitle search completed", {
           requestId,
           mediaId: media.id,
@@ -823,7 +831,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const cacheMaxAge = entry.complete ? 300 : 0;
         // Counts only (no ids, keys or names): lets the owner see why a list
         // is short without access to the hosting logs.
-        const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)}`;
+        const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
         if (media.type === "series") prefetchNextEpisode(type, videoId);
         return json(response, 200, { subtitles, cacheMaxAge }, { "Cache-Control": "no-store", "X-Listing-Status": status });
       }

@@ -24,6 +24,9 @@ const PLATFORMS = [
   ["osn", ["osn", "osnplus"]],
   ["hidive", ["hidive", "hidi"]]
 ];
+// Compiled once: building these per call was the largest CPU cost of a
+// listing (hundreds of names x 30 patterns), seconds on a free instance.
+const PLATFORM_PATTERNS = PLATFORMS.map(([id, aliases]) => [id, aliases.map((alias) => new RegExp(`(^| )${alias.replace(" ", " +")}( |$)`))]);
 const TITLE_STOP_WORDS = new Set(["the", "a", "an", "and", "of", "in", "on", "to", "with", "no", "de"]);
 
 export function normalizeName(value = "") {
@@ -55,6 +58,10 @@ export function releaseTitle(value = "") {
 }
 
 export function titleTokens(value = "") {
+  return tokenMemo(String(value), () => titleTokensUncached(value)).slice();
+}
+
+function titleTokensUncached(value) {
   return releaseTitle(value).split(" ").filter((token) => token.length >= 2 && !TITLE_STOP_WORDS.has(token) && !/^\d+$/.test(token));
 }
 
@@ -109,7 +116,27 @@ function firstMatch(text, regex, group = 1) {
   return match ? match[group]?.toLowerCase() : undefined;
 }
 
+// The same few hundred names are parsed again by every ranking pass.
+const memo = (limit) => {
+  const entries = new Map();
+  return (key, compute) => {
+    let value = entries.get(key);
+    if (value === undefined) {
+      value = compute();
+      entries.set(key, value);
+      if (entries.size > limit) entries.delete(entries.keys().next().value);
+    }
+    return value;
+  };
+};
+const releaseMemo = memo(4000);
+const tokenMemo = memo(4000);
+
 export function parseReleaseName(filename = "") {
+  return { ...releaseMemo(String(filename), () => parseReleaseNameUncached(String(filename))) };
+}
+
+function parseReleaseNameUncached(filename) {
   const normalized = normalizeName(filename);
   const seasonEpisode = filename.match(/s(\d{1,2})[ ._-]*(?:ep?|episode)[ ._-]*0*(\d{1,3})/i) || filename.match(/\b(\d{1,2})x(\d{1,3})\b/i);
   const releaseSeason = filename.match(/(?:^|[^a-z0-9])r([12])(?:[^a-z0-9]|$)/i);
@@ -119,7 +146,7 @@ export function parseReleaseName(filename = "") {
   const season = seasonEpisode ? Number(seasonEpisode[1]) : Number(releaseSeason?.[1]) || undefined;
   const source = SOURCE_ALIASES.find(([, aliases]) => aliases.some((pattern) => pattern.test(normalized)))?.[0];
   const edition = EDITIONS.find((item) => normalized.includes(item.replace("'", "")));
-  const platform = PLATFORMS.find(([, aliases]) => aliases.some((alias) => new RegExp(`(^| )${alias.replace(" ", " +")}( |$)`).test(normalized)))?.[0];
+  const platform = PLATFORM_PATTERNS.find(([, patterns]) => patterns.some((pattern) => pattern.test(normalized)))?.[0];
   const suffixGroup = filename.match(/-([A-Za-z0-9]+)(?:\.[A-Za-z0-9]{2,4})?$/)?.[1];
   const prefixGroup = filename.match(/^\s*\[([^\]]+)\]/)?.[1];
   // Absolute anime numbering ("[Group] Title - 1085 [1080p]") without a season.
