@@ -561,6 +561,236 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     }).catch(() => null);
   });
 
+  // The whole listing computation for one request. Kept separate from the
+  // HTTP handler so a finished answer can be rebuilt in the background.
+  async function buildListing(request, type, encodedId, encodedExtra, srtOnly, started, requestId) {
+    const listingDeadline = started + config.listingDeadlineMs;
+    const videoId = decodeURIComponent(encodedId);
+    if (videoId.length > 200) throw new Error("Video id is too long");
+    const extra = parseExtra(decodeURIComponent(encodedExtra));
+    const key = searchKey(type, videoId, extra);
+    const marks = [];
+    const mark = (name) => marks.push(`${name}:${Date.now() - started}`);
+    let entry = await searchStore.get(key);
+    mark("get");
+    // Entries saved by older versions for a Kitsu id that was never mapped
+    // to IMDb are empty by construction; ignore them and resolve again.
+    if (entry && identityUnresolved(entry.media)) entry = undefined;
+    // A request with a filename/hash has its own cache entry, but the same
+    // episode searched without them (or prepared in advance as "next
+    // episode") already holds almost every candidate: answer from it now
+    // and complete the filename-specific search in the background.
+    let seeded = false;
+    if (!entry && (extra.filename || extra.videoHash)) {
+      const base = await searchStore.get(searchKey(type, videoId, {}));
+      if (base && !identityUnresolved(base.media)) {
+        entry = base;
+        seeded = true;
+      }
+    }
+    // Reuse the media identity resolved the first time. Re-resolving on
+    // every request made results depend on transient Cinemeta timeouts.
+    // A seeded answer uses the episode's stored identity plus what the
+    // filename itself says; the Cinemeta checks (several seconds on the
+    // free instance) run with the background refresh instead.
+    let media = seeded ? alignMediaLocally(entry.media, extra) : entry?.media;
+    if (!media) {
+      const resolvedMedia = await resolveVideoId(type, videoId);
+      media = await alignMediaToFilename(resolvedMedia, extra);
+    }
+    mark("media");
+    const context = { media, extra };
+    const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
+    if (!entry) {
+      // First request for this video: finding candidates matters more
+      // than verifying them now (verification continues in the background
+      // and every link has download fallbacks). On a slow free instance a
+      // 5 s search budget returned only a handful of candidates.
+      const searchBudget = Math.max(500, Math.max(config.providerSearchTimeoutMs, listingDeadline - Date.now() - 1800));
+      entry = await runSearch(key, context, searchBudget);
+      if (!entry.complete) scheduleRefreshLater(key, context);
+    } else if (cacheState === "seeded") {
+      track(runInBackground(async () => {
+        const aligned = await alignMediaToFilename(await resolveVideoId(type, videoId), extra);
+        await scheduleRefresh(key, { media: aligned, extra });
+      }).catch(() => null));
+    } else if (cacheState === "stale") {
+      // Serve the best previous result now and refresh in the background.
+      scheduleRefresh(key, context);
+    }
+    const candidates = entry.candidates;
+    logger.info("subtitle listing search ready", { requestId, candidates: candidates.length, cache: cacheState, complete: entry.complete, elapsedMs: Date.now() - started });
+    mark("search");
+    let ranked = rankCandidates(candidates, context, config);
+    mark("rank");
+    const fallbackConfidence = Math.max(45, config.minConfidence - 25);
+    const preliminary = ranked.filter((candidate) =>
+      candidate.confidence >= fallbackConfidence && !candidate.reasons?.includes("season-pack")
+    );
+    const companionBudget = Math.max(0, Math.min(config.companionWaitMs, listingDeadline - Date.now() - 1000));
+    let companionSession = companionBudget > 0 ? await companion.waitForRecent(companionBudget) : companion.latest();
+    if (!companionSession && process.platform === "win32") {
+      const discoveryBudget = Math.max(0, Math.min(750, listingDeadline - Date.now() - 1000));
+      const discovered = discoveryBudget > 0
+        ? await within(discoverLocalPlayback(), discoveryBudget, null)
+        : null;
+      if (discovered) companionSession = companion.registerTrusted(discovered);
+    }
+    const referenceBudget = Math.max(0, Math.min(1800, listingDeadline - Date.now() - 1000));
+    const localReference = companionSession && referenceBudget > 0
+      ? await within(
+        mediaAnalyzer.bestReference(companionSession.streamUrl, companionSession.duration, companionSession.playbackTime).catch(() => null),
+        referenceBudget,
+        null
+      )
+      : null;
+    const analysisBudget = Math.max(0, Math.min(config.deepAnalysisTimeoutMs, listingDeadline - Date.now() - 300));
+    if (analysisBudget >= 500) {
+      ranked = await deepAnalyzeCandidates(preliminary, context, actualProvider, actualCache, {
+        limit: config.deepAnalysisCandidates,
+        // New downloads inside the request; the rest are validated in the
+        // background and reused from the verdict store next time.
+        // Only a brand-new search parses files while the player waits;
+        // a cached, stale or seeded list answers at once and anything
+        // still unverified is checked by the background validation.
+        maxDownloads: cacheState === "miss" ? config.listingDownloads : 0,
+        timeoutMs: analysisBudget,
+        reference: localReference,
+        verdicts: verdictStore,
+        preferences,
+        expectedDurationSeconds: companionSession?.duration,
+        maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
+      });
+    } else {
+      ranked = preliminary;
+    }
+    mark("deep");
+    if (ranked.some((candidate) => !candidate.deepAnalyzed)) scheduleValidation(key, entry, context);
+    const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
+    // A provider whose daily download quota is used up cannot deliver
+    // its files; listing them only produces "Failed to load" in Stremio.
+    const unavailable = (candidate) => Boolean(actualProvider.byId?.get(candidate.provider)?.isQuotaExhausted?.());
+    const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed && !unavailable(candidate)), companionSession?.duration);
+    let eligible = requireVerifiedDownload
+      ? [
+        ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
+        ...usable.filter((candidate) => candidate.deepAnalyzed !== true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch"))
+      ]
+      : [
+        ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
+        ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
+      ];
+    // SRT mode: the same subtitles, converted on delivery to SRT that keeps
+    // colours, italics/bold and top/bottom position (<font color>, {anN}),
+    // which Android TV and iPad players render with correct timing.
+    if (srtOnly) eligible = eligible.map((candidate) => ({ ...candidate, actualFormat: "srt" }));
+    const displayRanked = sortForDisplay(eligible);
+    const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
+    const selected = sortForDisplay(diverse);
+    const subtitles = selected.map((candidate, index) => {
+      const extension = extensionOf(candidate);
+      const fallback = fallbackCandidates(eligible, candidate, extension, config.downloadFallbacks);
+      const items = fallback.map((item) => ({
+        provider: item.provider || "opensubtitles",
+        ref: item.downloadRef ?? item.fileId,
+        fileId: item.fileId,
+        season: item.featureDetails?.seasonNumber ?? parseReleaseName(item.fileName || item.release || "").season ?? media.season,
+        episode: item.featureDetails?.episodeNumber ?? parseReleaseName(item.fileName || item.release || "").episode ?? media.episode,
+        fileName: item.fileName || item.release || `subtitle.${extensionOf(item)}`,
+        extension: extensionOf(item),
+        fps: item.fps,
+        confidence: item.confidence,
+        reasons: (item.reasons || []).filter((reason) => !reason.startsWith("q:")),
+        syncScore: item.syncScore || 0,
+        qualityScore: item.qualityScore || 0,
+        verified: Boolean(item.deepAnalyzed),
+        transform: serializableTransform(timingTransform(item, config.syncMinConfidence))
+      }));
+      const token = signSubtitleToken({ items, extension, context: { media, extra } }, config.tokenSecret);
+      const stableId = createHash("sha256").update(`${candidate.provider || "opensubtitles"}:${candidate.fileId}`).digest("hex").slice(0, 16);
+      const label = detailedResultLabel(candidate, index);
+      return {
+        id: `arabic-syncrank-${stableId}`,
+        // Some players (Harbor) ignore "label" and title the subtitle with
+        // the last part of its URL, so the readable label goes there too.
+        url: `${baseUrl(request, config)}/subtitle/${token}/${readableUrlName(label)}.${extension}`,
+        lang: "ara",
+        label
+      };
+    });
+    mark("build");
+    logger.info("subtitle search completed", {
+      requestId,
+      mediaId: media.id,
+      filename: extra.filename ? path.basename(extra.filename).slice(0, 160) : "",
+      hasVideoHash: Boolean(extra.videoHash),
+      count: subtitles.length,
+      providerCandidates: candidates.length,
+      providers: Object.fromEntries(Object.entries(entry.providers || {}).map(([id, status]) => [id, `${status.status}:${status.count ?? 0}`])),
+      eligibleCandidates: eligible.length,
+      deepAnalyzed: selected.filter((candidate) => candidate.deepAnalyzed).length,
+      timingCalibrated: selected.filter((candidate) => timingTransform(candidate, config.syncMinConfidence)).length,
+      styledCandidates: selected.filter((candidate) => candidate.styled).length,
+      companionReference: localReference?.source,
+      cache: cacheState,
+      complete: entry.complete,
+      durationMs: Date.now() - started
+    });
+    // A short client cache only for complete results; partial lists must
+    // be re-requested so the improved list shows up on the next open.
+    const cacheMaxAge = entry.complete ? 300 : 0;
+    // Counts only (no ids, keys or names): lets the owner see why a list
+    // is short without access to the hosting logs.
+    const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
+    if (media.type === "series") prefetchNextEpisode(type, videoId);
+    return { key, complete: entry.complete, count: subtitles.length, body: { subtitles, cacheMaxAge }, headers: { "Cache-Control": "no-store", "X-Listing-Status": status } };
+  }
+
+  // Finished answers per URL. A player asking again (Harbor asks on every
+  // open) gets the last answer in milliseconds instead of waiting seconds
+  // for ranking on a fraction of a CPU; when anything changed since (new
+  // search results or verdicts) the answer is rebuilt in the background.
+  const readyAnswers = new Map();
+  const answerRebuilds = new Set();
+  let stateEpoch = 0;
+  const answersBySearchKey = new Map();
+  for (const store of [searchStore, verdictStore]) {
+    const set = store.set.bind(store);
+    store.set = (...args) => {
+      stateEpoch += 1;
+      const stored = set(...args);
+      // New search results: prepare the answer now, before the next open.
+      if (store === searchStore) {
+        for (const answerKey of answersBySearchKey.get(args[0]) || []) {
+          const ready = readyAnswers.get(answerKey);
+          if (ready) rebuildAnswer(answerKey, ready.build);
+        }
+      }
+      return stored;
+    };
+  }
+  function rememberAnswer(answerKey, result, epoch, build) {
+    readyAnswers.delete(answerKey);
+    if (!result.count) return;
+    readyAnswers.set(answerKey, { ...result, epoch, build, at: Date.now() });
+    if (!answersBySearchKey.has(result.key)) answersBySearchKey.set(result.key, new Set());
+    answersBySearchKey.get(result.key).add(answerKey);
+    while (readyAnswers.size > 1000) {
+      const oldest = readyAnswers.keys().next().value;
+      answersBySearchKey.get(readyAnswers.get(oldest).key)?.delete(oldest);
+      readyAnswers.delete(oldest);
+    }
+    while (answersBySearchKey.size > 2000) answersBySearchKey.delete(answersBySearchKey.keys().next().value);
+  }
+  function rebuildAnswer(answerKey, build) {
+    if (answerRebuilds.has(answerKey)) return;
+    answerRebuilds.add(answerKey);
+    track(runInBackground(async () => {
+      const epoch = stateEpoch;
+      rememberAnswer(answerKey, await build(), epoch, build);
+    }).finally(() => answerRebuilds.delete(answerKey)));
+  }
+
   const server = http.createServer(async (request, response) => {
     const requestId = randomUUID();
     const started = Date.now();
@@ -653,187 +883,19 @@ export async function createAddonServer({ config = readConfig(), provider, cache
 
       const subtitleRoute = url.pathname.match(/^\/subtitles\/(movie|series)\/([^/]+)(?:\/(.*))?\.json$/);
       if (subtitleRoute) {
-        const listingDeadline = started + config.listingDeadlineMs;
         const [, type, encodedId, encodedExtra = ""] = subtitleRoute;
-        const videoId = decodeURIComponent(encodedId);
-        if (videoId.length > 200) throw new Error("Video id is too long");
-        const extra = parseExtra(decodeURIComponent(encodedExtra));
-        const key = searchKey(type, videoId, extra);
-        const marks = [];
-        const mark = (name) => marks.push(`${name}:${Date.now() - started}`);
-        let entry = await searchStore.get(key);
-        mark("get");
-        // Entries saved by older versions for a Kitsu id that was never mapped
-        // to IMDb are empty by construction; ignore them and resolve again.
-        if (entry && identityUnresolved(entry.media)) entry = undefined;
-        // A request with a filename/hash has its own cache entry, but the same
-        // episode searched without them (or prepared in advance as "next
-        // episode") already holds almost every candidate: answer from it now
-        // and complete the filename-specific search in the background.
-        let seeded = false;
-        if (!entry && (extra.filename || extra.videoHash)) {
-          const base = await searchStore.get(searchKey(type, videoId, {}));
-          if (base && !identityUnresolved(base.media)) {
-            entry = base;
-            seeded = true;
-          }
+        const answerKey = `${srtOnly ? "srt" : "all"}|${baseUrl(request, config)}|${url.pathname}`;
+        const ready = config.readyAnswers && !companion.latest() ? readyAnswers.get(answerKey) : undefined;
+        if (ready && Date.now() - ready.at < 6 * 3600 * 1000) {
+          if (ready.epoch !== stateEpoch || !ready.complete) rebuildAnswer(answerKey, ready.build);
+          return json(response, 200, ready.body, { ...ready.headers, "X-Listing-Status": `${ready.headers["X-Listing-Status"]};answer=ready;served=${Date.now() - started}` });
         }
-        // Reuse the media identity resolved the first time. Re-resolving on
-        // every request made results depend on transient Cinemeta timeouts.
-        // A seeded answer uses the episode's stored identity plus what the
-        // filename itself says; the Cinemeta checks (several seconds on the
-        // free instance) run with the background refresh instead.
-        let media = seeded ? alignMediaLocally(entry.media, extra) : entry?.media;
-        if (!media) {
-          const resolvedMedia = await resolveVideoId(type, videoId);
-          media = await alignMediaToFilename(resolvedMedia, extra);
-        }
-        mark("media");
-        const context = { media, extra };
-        const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
-        if (!entry) {
-          // First request for this video: finding candidates matters more
-          // than verifying them now (verification continues in the background
-          // and every link has download fallbacks). On a slow free instance a
-          // 5 s search budget returned only a handful of candidates.
-          const searchBudget = Math.max(500, Math.max(config.providerSearchTimeoutMs, listingDeadline - Date.now() - 1800));
-          entry = await runSearch(key, context, searchBudget);
-          if (!entry.complete) scheduleRefreshLater(key, context);
-        } else if (cacheState === "seeded") {
-          track(runInBackground(async () => {
-            const aligned = await alignMediaToFilename(await resolveVideoId(type, videoId), extra);
-            await scheduleRefresh(key, { media: aligned, extra });
-          }).catch(() => null));
-        } else if (cacheState === "stale") {
-          // Serve the best previous result now and refresh in the background.
-          scheduleRefresh(key, context);
-        }
-        const candidates = entry.candidates;
-        logger.info("subtitle listing search ready", { requestId, candidates: candidates.length, cache: cacheState, complete: entry.complete, elapsedMs: Date.now() - started });
-        mark("search");
-        let ranked = rankCandidates(candidates, context, config);
-        mark("rank");
-        const fallbackConfidence = Math.max(45, config.minConfidence - 25);
-        const preliminary = ranked.filter((candidate) =>
-          candidate.confidence >= fallbackConfidence && !candidate.reasons?.includes("season-pack")
-        );
-        const companionBudget = Math.max(0, Math.min(config.companionWaitMs, listingDeadline - Date.now() - 1000));
-        let companionSession = companionBudget > 0 ? await companion.waitForRecent(companionBudget) : companion.latest();
-        if (!companionSession && process.platform === "win32") {
-          const discoveryBudget = Math.max(0, Math.min(750, listingDeadline - Date.now() - 1000));
-          const discovered = discoveryBudget > 0
-            ? await within(discoverLocalPlayback(), discoveryBudget, null)
-            : null;
-          if (discovered) companionSession = companion.registerTrusted(discovered);
-        }
-        const referenceBudget = Math.max(0, Math.min(1800, listingDeadline - Date.now() - 1000));
-        const localReference = companionSession && referenceBudget > 0
-          ? await within(
-            mediaAnalyzer.bestReference(companionSession.streamUrl, companionSession.duration, companionSession.playbackTime).catch(() => null),
-            referenceBudget,
-            null
-          )
-          : null;
-        const analysisBudget = Math.max(0, Math.min(config.deepAnalysisTimeoutMs, listingDeadline - Date.now() - 300));
-        if (analysisBudget >= 500) {
-          ranked = await deepAnalyzeCandidates(preliminary, context, actualProvider, actualCache, {
-            limit: config.deepAnalysisCandidates,
-            // New downloads inside the request; the rest are validated in the
-            // background and reused from the verdict store next time.
-            // Only a brand-new search parses files while the player waits;
-            // a cached, stale or seeded list answers at once and anything
-            // still unverified is checked by the background validation.
-            maxDownloads: cacheState === "miss" ? config.listingDownloads : 0,
-            timeoutMs: analysisBudget,
-            reference: localReference,
-            verdicts: verdictStore,
-            preferences,
-            expectedDurationSeconds: companionSession?.duration,
-            maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
-          });
-        } else {
-          ranked = preliminary;
-        }
-        mark("deep");
-        if (ranked.some((candidate) => !candidate.deepAnalyzed)) scheduleValidation(key, entry, context);
-        const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
-        // A provider whose daily download quota is used up cannot deliver
-        // its files; listing them only produces "Failed to load" in Stremio.
-        const unavailable = (candidate) => Boolean(actualProvider.byId?.get(candidate.provider)?.isQuotaExhausted?.());
-        const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed && !unavailable(candidate)), companionSession?.duration);
-        let eligible = requireVerifiedDownload
-          ? [
-            ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
-            ...usable.filter((candidate) => candidate.deepAnalyzed !== true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch"))
-          ]
-          : [
-            ...usable.filter((candidate) => candidate.confidence >= config.minConfidence),
-            ...usable.filter((candidate) => candidate.confidence < config.minConfidence)
-          ];
-        // SRT mode: the same subtitles, converted on delivery to SRT that keeps
-        // colours, italics/bold and top/bottom position (<font color>, {anN}),
-        // which Android TV and iPad players render with correct timing.
-        if (srtOnly) eligible = eligible.map((candidate) => ({ ...candidate, actualFormat: "srt" }));
-        const displayRanked = sortForDisplay(eligible);
-        const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
-        const selected = sortForDisplay(diverse);
-        const subtitles = selected.map((candidate, index) => {
-          const extension = extensionOf(candidate);
-          const fallback = fallbackCandidates(eligible, candidate, extension, config.downloadFallbacks);
-          const items = fallback.map((item) => ({
-            provider: item.provider || "opensubtitles",
-            ref: item.downloadRef ?? item.fileId,
-            fileId: item.fileId,
-            season: item.featureDetails?.seasonNumber ?? parseReleaseName(item.fileName || item.release || "").season ?? media.season,
-            episode: item.featureDetails?.episodeNumber ?? parseReleaseName(item.fileName || item.release || "").episode ?? media.episode,
-            fileName: item.fileName || item.release || `subtitle.${extensionOf(item)}`,
-            extension: extensionOf(item),
-            fps: item.fps,
-            confidence: item.confidence,
-            reasons: (item.reasons || []).filter((reason) => !reason.startsWith("q:")),
-            syncScore: item.syncScore || 0,
-            qualityScore: item.qualityScore || 0,
-            verified: Boolean(item.deepAnalyzed),
-            transform: serializableTransform(timingTransform(item, config.syncMinConfidence))
-          }));
-          const token = signSubtitleToken({ items, extension, context: { media, extra } }, config.tokenSecret);
-          const stableId = createHash("sha256").update(`${candidate.provider || "opensubtitles"}:${candidate.fileId}`).digest("hex").slice(0, 16);
-          const label = detailedResultLabel(candidate, index);
-          return {
-            id: `arabic-syncrank-${stableId}`,
-            // Some players (Harbor) ignore "label" and title the subtitle with
-            // the last part of its URL, so the readable label goes there too.
-            url: `${baseUrl(request, config)}/subtitle/${token}/${readableUrlName(label)}.${extension}`,
-            lang: "ara",
-            label
-          };
-        });
-        mark("build");
-        logger.info("subtitle search completed", {
-          requestId,
-          mediaId: media.id,
-          filename: extra.filename ? path.basename(extra.filename).slice(0, 160) : "",
-          hasVideoHash: Boolean(extra.videoHash),
-          count: subtitles.length,
-          providerCandidates: candidates.length,
-          providers: Object.fromEntries(Object.entries(entry.providers || {}).map(([id, status]) => [id, `${status.status}:${status.count ?? 0}`])),
-          eligibleCandidates: eligible.length,
-          deepAnalyzed: selected.filter((candidate) => candidate.deepAnalyzed).length,
-          timingCalibrated: selected.filter((candidate) => timingTransform(candidate, config.syncMinConfidence)).length,
-          styledCandidates: selected.filter((candidate) => candidate.styled).length,
-          companionReference: localReference?.source,
-          cache: cacheState,
-          complete: entry.complete,
-          durationMs: Date.now() - started
-        });
-        // A short client cache only for complete results; partial lists must
-        // be re-requested so the improved list shows up on the next open.
-        const cacheMaxAge = entry.complete ? 300 : 0;
-        // Counts only (no ids, keys or names): lets the owner see why a list
-        // is short without access to the hosting logs.
-        const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
-        if (media.type === "series") prefetchNextEpisode(type, videoId);
-        return json(response, 200, { subtitles, cacheMaxAge }, { "Cache-Control": "no-store", "X-Listing-Status": status });
+        const epoch = stateEpoch;
+        const result = await buildListing(request, type, encodedId, encodedExtra, srtOnly, started, requestId);
+        // Rebuilds keep only what a URL needs, not the original request.
+        const headers = { host: request.headers.host, "x-forwarded-proto": request.headers["x-forwarded-proto"] };
+        rememberAnswer(answerKey, result, epoch, () => buildListing({ headers }, type, encodedId, encodedExtra, srtOnly, Date.now(), randomUUID()));
+        return json(response, 200, result.body, result.headers);
       }
 
       // "/subtitle/<token>.<ext>" (older links) or "/subtitle/<token>/<name>.<ext>".

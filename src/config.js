@@ -55,6 +55,7 @@ export function readConfig(env = process.env) {
     providerSearchTimeoutMs: int(env.PROVIDER_SEARCH_TIMEOUT_MS, 5000, 1000, 10000),
     providerHardTimeoutMs: int(env.PROVIDER_HARD_TIMEOUT_MS, 12000, 2000, 30000),
     onDemandSyncTimeoutMs: int(env.ON_DEMAND_SYNC_TIMEOUT_MS, 6000, 1000, 10000),
+    readyAnswers: bool(env.READY_ANSWERS, true),
     companionWaitMs: int(env.COMPANION_WAIT_MS, 0, 0, 5000),
     backgroundValidation: bool(env.BACKGROUND_VALIDATION, true),
     backgroundValidationTimeoutMs: int(env.BACKGROUND_VALIDATION_TIMEOUT_MS, 25000, 2000, 120000),
