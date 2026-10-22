@@ -437,10 +437,13 @@ export async function createAddonServer({ config = readConfig(), provider, cache
 
   // Serialises read-merge-write per key so concurrent requests and late
   // provider results never overwrite each other's merges.
-  function mergeIntoStore(key, snapshot, media) {
+  function mergeIntoStore(key, snapshot, media, seedKey) {
     const previousLock = storeLocks.get(key) || Promise.resolve();
     const work = previousLock.then(async () => {
-      const previous = await searchStore.get(key);
+      // A filename-specific entry starts from the same episode's general
+      // entry: a background search that failed on the free instance stored
+      // an empty list here, which then hid every subtitle of the episode.
+      const previous = (await searchStore.get(key)) || (seedKey ? await searchStore.get(seedKey) : undefined);
       const merged = mergeSearchEntries(previous, snapshot, expectedProviders);
       const unresolved = identityUnresolved(media || previous?.media);
       const entry = deepFreeze({ ...merged, complete: merged.complete && !unresolved, media: media || previous?.media });
@@ -459,7 +462,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
 
   async function runSearch(key, context, timeoutMs) {
     const onLate = (late) => {
-      track(mergeIntoStore(key, late, context.media).then((entry) => {
+      track(mergeIntoStore(key, late, context.media, context.seedKey).then((entry) => {
         logger.info("late provider results merged", { providers: Object.keys(late.providers), candidates: entry.candidates.length, complete: entry.complete });
         scheduleValidation(key, entry, context);
       }));
@@ -477,7 +480,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         complete: true
       });
     }
-    return mergeIntoStore(key, snapshot, context.media);
+    return mergeIntoStore(key, snapshot, context.media, context.seedKey);
   }
 
   const lastRefreshAt = new Map();
@@ -581,9 +584,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     // episode") already holds almost every candidate: answer from it now
     // and complete the filename-specific search in the background.
     let seeded = false;
-    if (!entry && (extra.filename || extra.videoHash)) {
-      const base = await searchStore.get(searchKey(type, videoId, {}));
-      if (base && !identityUnresolved(base.media)) {
+    const seedKey = extra.filename || extra.videoHash ? searchKey(type, videoId, {}) : undefined;
+    if (seedKey && !entry?.candidates?.length) {
+      const base = await searchStore.get(seedKey);
+      if (base && !identityUnresolved(base.media) && base.candidates.length > (entry?.candidates?.length || 0)) {
         entry = base;
         seeded = true;
       }
@@ -599,7 +603,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       media = await alignMediaToFilename(resolvedMedia, extra);
     }
     mark("media");
-    const context = { media, extra };
+    const context = { media, extra, seedKey };
     const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
     if (!entry) {
       // First request for this video: finding candidates matters more
@@ -612,7 +616,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     } else if (cacheState === "seeded") {
       track(runInBackground(async () => {
         const aligned = await alignMediaToFilename(await resolveVideoId(type, videoId), extra);
-        await scheduleRefresh(key, { media: aligned, extra });
+        await scheduleRefresh(key, { media: aligned, extra, seedKey });
       }).catch(() => null));
     } else if (cacheState === "stale") {
       // Serve the best previous result now and refresh in the background.
@@ -654,7 +658,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         // a cached, stale or seeded list answers at once and anything
         // still unverified is checked by the background validation.
         maxDownloads: cacheState === "miss" ? config.listingDownloads : 0,
-        timeoutMs: analysisBudget,
+        // Reading earlier verdicts is network I/O; a cached list does not
+        // wait long for them (the rest are listed as not yet verified).
+        timeoutMs: cacheState === "miss" ? analysisBudget : Math.min(analysisBudget, 1500),
         reference: localReference,
         verdicts: verdictStore,
         preferences,
