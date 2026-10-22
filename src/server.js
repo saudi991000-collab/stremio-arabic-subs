@@ -726,7 +726,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
             limit: config.deepAnalysisCandidates,
             // New downloads inside the request; the rest are validated in the
             // background and reused from the verdict store next time.
-            maxDownloads: config.listingDownloads,
+            // Only a brand-new search parses files while the player waits;
+            // a cached, stale or seeded list answers at once and anything
+            // still unverified is checked by the background validation.
+            maxDownloads: cacheState === "miss" ? config.listingDownloads : 0,
             timeoutMs: analysisBudget,
             reference: localReference,
             verdicts: verdictStore,
