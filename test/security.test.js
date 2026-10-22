@@ -110,7 +110,7 @@ test("API keys never appear in listings, tokens, health or logs", async () => {
       assert.doesNotMatch(listing, new RegExp(secretKey));
       assert.doesNotMatch(health, new RegExp(secretKey));
       const url = JSON.parse(listing).subtitles[0].url;
-      const token = url.match(/\/subtitle\/([^/]+)\.srt$/)[1];
+      const token = url.match(/\/subtitle\/([^/]+)\//)[1];
       assert.doesNotMatch(JSON.stringify(verifySubtitleToken(token, "security-secret")), new RegExp(secretKey));
     });
   } finally {

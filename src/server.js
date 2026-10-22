@@ -194,6 +194,18 @@ export function detailedResultLabel(candidate, index) {
   return `${index + 1}${badges ? ` ${badges}` : ""} | ${details.join(" • ")}`;
 }
 
+// URL-safe version of the label for the subtitle link's final path segment.
+export function readableUrlName(label) {
+  const clean = String(label || "subtitle")
+    .replace(/[\\/?#%]/g, " ")
+    .replace(/[\u0000-\u001f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Cut by code points so an emoji is never split into a lone surrogate.
+  const text = Array.from(clean).slice(0, 140).join("").trim() || "subtitle";
+  return encodeURIComponent(text);
+}
+
 function displayBadgeProfile(candidate) {
   const { matched, team, styled } = badgesFor(candidate);
   return {
@@ -508,6 +520,31 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     return work;
   }
 
+  // While an episode is watched, search the next one in the background so its
+  // list is ready (and instant) when the player asks for it.
+  const prefetched = new Map();
+  function prefetchNextEpisode(type, videoId) {
+    const match = String(videoId).match(/^(.*:)(\d{1,5})$/);
+    if (!match) return;
+    const nextId = `${match[1]}${Number(match[2]) + 1}`;
+    if (prefetched.has(nextId)) return;
+    prefetched.set(nextId, Date.now());
+    if (prefetched.size > 2000) prefetched.delete(prefetched.keys().next().value);
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      track(runInBackground(async () => {
+        const nextKey = searchKey(type, nextId, {});
+        const existing = await searchStore.get(nextKey);
+        if (existing && !identityUnresolved(existing.media)) return;
+        const nextMedia = await alignMediaToFilename(await resolveVideoId(type, nextId), {});
+        if (identityUnresolved(nextMedia)) return;
+        scheduleRefresh(nextKey, { media: nextMedia, extra: { filename: "", videoHash: "" } });
+      }));
+    }, 3000);
+    timer.unref?.();
+    retryTimers.add(timer);
+  }
+
   // Load large provider indexes (archive listings, show lists) at start-up
   // instead of inside the first listing, where parsing them on a small
   // instance delayed every other provider.
@@ -626,15 +663,27 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         // Entries saved by older versions for a Kitsu id that was never mapped
         // to IMDb are empty by construction; ignore them and resolve again.
         if (entry && identityUnresolved(entry.media)) entry = undefined;
+        // A request with a filename/hash has its own cache entry, but the same
+        // episode searched without them (or prepared in advance as "next
+        // episode") already holds almost every candidate: answer from it now
+        // and complete the filename-specific search in the background.
+        let seeded = false;
+        if (!entry && (extra.filename || extra.videoHash)) {
+          const base = await searchStore.get(searchKey(type, videoId, {}));
+          if (base && !identityUnresolved(base.media)) {
+            entry = base;
+            seeded = true;
+          }
+        }
         // Reuse the media identity resolved the first time. Re-resolving on
         // every request made results depend on transient Cinemeta timeouts.
-        let media = entry?.media;
+        let media = seeded ? undefined : entry?.media;
         if (!media) {
           const resolvedMedia = await resolveVideoId(type, videoId);
           media = await alignMediaToFilename(resolvedMedia, extra);
         }
         const context = { media, extra };
-        const cacheState = !entry ? "miss" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
+        const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
         if (!entry) {
           // First request for this video: finding candidates matters more
           // than verifying them now (verification continues in the background
@@ -643,7 +692,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           const searchBudget = Math.max(500, Math.max(config.providerSearchTimeoutMs, listingDeadline - Date.now() - 1800));
           entry = await runSearch(key, context, searchBudget);
           if (!entry.complete) scheduleRefreshLater(key, context);
-        } else if (cacheState === "stale") {
+        } else if (cacheState === "stale" || cacheState === "seeded") {
           // Serve the best previous result now and refresh in the background.
           scheduleRefresh(key, context);
         }
@@ -731,11 +780,14 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           }));
           const token = signSubtitleToken({ items, extension, context: { media, extra } }, config.tokenSecret);
           const stableId = createHash("sha256").update(`${candidate.provider || "opensubtitles"}:${candidate.fileId}`).digest("hex").slice(0, 16);
+          const label = detailedResultLabel(candidate, index);
           return {
             id: `arabic-syncrank-${stableId}`,
-            url: `${baseUrl(request, config)}/subtitle/${token}.${extension}`,
+            // Some players (Harbor) ignore "label" and title the subtitle with
+            // the last part of its URL, so the readable label goes there too.
+            url: `${baseUrl(request, config)}/subtitle/${token}/${readableUrlName(label)}.${extension}`,
             lang: "ara",
-            label: detailedResultLabel(candidate, index)
+            label
           };
         });
         logger.info("subtitle search completed", {
@@ -761,10 +813,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         // Counts only (no ids, keys or names): lets the owner see why a list
         // is short without access to the hosting logs.
         const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)}`;
+        if (media.type === "series") prefetchNextEpisode(type, videoId);
         return json(response, 200, { subtitles, cacheMaxAge }, { "Cache-Control": "no-store", "X-Listing-Status": status });
       }
 
-      const proxyRoute = url.pathname.match(/^\/subtitle\/([A-Za-z0-9_.-]{1,12000})\.(srt|vtt|ass|ssa)$/i);
+      // "/subtitle/<token>.<ext>" (older links) or "/subtitle/<token>/<name>.<ext>".
+      const proxyRoute = url.pathname.match(/^\/subtitle\/([A-Za-z0-9_.-]{1,12000}?)(?:\/[^/]{1,800})?\.(srt|vtt|ass|ssa)$/i);
       if (proxyRoute) {
         const payload = verifySubtitleToken(proxyRoute[1], config.tokenSecret);
         if (payload.extension !== proxyRoute[2].toLowerCase()) throw new Error("Subtitle extension mismatch");

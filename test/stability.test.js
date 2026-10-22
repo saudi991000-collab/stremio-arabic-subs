@@ -237,3 +237,41 @@ test("disk store returns immutable values and expires them", async () => {
   assert.equal(await store.get("short"), undefined);
   await store.flush();
 });
+
+test("subtitle links end with the readable label, and older links keep working", async () => {
+  const provider = new MultiProvider([fakeProvider("named", 1)]);
+  await withServer(provider, {}, async (base) => {
+    const list = await listing(base);
+    const { url, label } = list.subtitles[0];
+    const name = decodeURIComponent(url.split("/").pop().replace(/\.srt$/, ""));
+    assert.equal(name, label.replace(/\|/g, "|"));
+    assert.equal((await fetch(url)).status, 200);
+    const legacy = url.replace(/\/[^/]+\.srt$/, ".srt");
+    const response = await fetch(legacy);
+    assert.equal(response.headers.get("x-subtitle-fallback"), null);
+    assert.match(await response.text(), /-->/);
+  });
+});
+
+test("prepares the next episode in the background and serves filename requests from it", async () => {
+  const seen = [];
+  const tracker = {
+    ...fakeProvider("next", 2),
+    async search(context) {
+      seen.push(context.media.episode);
+      return [7, 8].includes(context.media.episode)
+        ? [{ provider: "next", fileId: `e${context.media.episode}`, downloadRef: `e${context.media.episode}`, fileName: `Show.S01E0${context.media.episode}.WEB-DL.srt`, language: "ar", featureDetails: { seasonNumber: 1, episodeNumber: context.media.episode } }]
+        : [];
+    }
+  };
+  await withServer(new MultiProvider([tracker]), {}, async (base, server) => {
+    await (await fetch(`${base}/subtitles/series/tt1234567:1:7.json`)).json();
+    await new Promise((resolve) => setTimeout(resolve, 3600));
+    await server.flushBackground();
+    assert.ok(seen.includes(8), "episode 8 was searched in advance");
+    const response = await fetch(`${base}/subtitles/series/tt1234567:1:8/filename=Show.S01E08.1080p.mkv.json`);
+    const value = await response.json();
+    assert.equal(value.subtitles.length, 1);
+    assert.match(response.headers.get("x-listing-status"), /cache=seeded/);
+  });
+});
