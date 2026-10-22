@@ -1,4 +1,4 @@
-import { normalizeName, parseReleaseName, titleSimilarity, titleTokens, titlesLikelyMatch } from "./media.js";
+import { looseEpisodeNumber, normalizeName, parseReleaseName, titleSimilarity, titleTokens, titlesLikelyMatch } from "./media.js";
 import { findArabicTeam } from "./teams.js";
 import { explicitMachineLabel } from "./quality.js";
 
@@ -114,6 +114,18 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   const titleReferences = [context.extra.filename, context.media.title, context.media.catalogTitle, context.media.releaseTitle]
     .filter((value) => value && titleTokens(value).length);
   const titleMatch = Boolean(actual.title && titleReferences.some((reference) => titlesLikelyMatch(reference, candidateName)));
+  // Files unpacked from a season archive are often named "code-geass13" or
+  // "Code Geass 11": the episode number is glued to the title, so the normal
+  // parser finds none and the provider's episode-scoped request let every
+  // episode of the season through. Read that trailing number and reject a
+  // different episode (unless the number belongs to the title itself).
+  let looseEpisode;
+  if (context.media.type === "series" && actual.episode == null && actual.absoluteEpisode == null) {
+    looseEpisode = looseEpisodeNumber(candidateName);
+    const titleNumbers = titleReferences.join(" ").match(/\d+/g) || [];
+    if (looseEpisode != null && titleNumbers.includes(String(looseEpisode))) looseEpisode = undefined;
+    if (looseEpisode != null && !candidate.hashMatch && looseEpisode !== context.media.episode && looseEpisode !== context.media.absoluteEpisode) return null;
+  }
   if (!context.media.imdbId && wanted.title && actual.title && !titleMatch) return null;
   // Extras and unrelated media filed under the same id: game playthroughs,
   // trailers, featurettes, "making of"...
@@ -200,7 +212,7 @@ export function scoreCandidate(candidate, context, preferences = {}) {
   }
 
   const metadataEpisodeMatch = context.media.type === "series" && Number(details.episodeNumber) === context.media.episode;
-  const filenameEpisodeMatch = context.media.type === "series" && (actual.episode === context.media.episode || absoluteMatch);
+  const filenameEpisodeMatch = context.media.type === "series" && (actual.episode === context.media.episode || absoluteMatch || looseEpisode === context.media.episode);
   // Some providers scope their API request to the exact season and episode but
   // return generic filenames (for example, "Arabic.srt"). Treat the scoped API
   // result as episode evidence instead of requiring the episode number to be

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseReleaseName } from "../src/media.js";
+import { looseEpisodeNumber, parseReleaseName } from "../src/media.js";
 import { rankCandidates, releaseMatched, scoreCandidate } from "../src/ranker.js";
 import { absoluteEpisodeFromVideos } from "../src/id-resolver.js";
 import { findArabicTeam, compileTeams } from "../src/teams.js";
@@ -128,4 +128,21 @@ test("Arabic teams come from the extensible configuration", () => {
   // Regex-like aliases are treated as plain text (no ReDoS possible).
   const tricky = compileTeams({ teams: [{ name: "X", aliases: ["(a+)+$"] }] });
   assert.equal(findArabicTeam({ fileName: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!" }, tricky), "");
+});
+
+test("rejects season-pack files whose episode number is glued to the title", () => {
+  const context = series("", 1, 10, { imdbId: "0994314", title: "Code Geass: Hangyaku no Lelouch", catalogTitle: "Code Geass: Lelouch of the Rebellion", absoluteEpisode: 10 });
+  context.extra.filename = "";
+  const scoped = { episodeScoped: true };
+  for (const name of ["code-geass13.srt", "code-geass05.srt", "Code Geass 11.srt", "code-geass19.srt"]) {
+    assert.equal(scoreCandidate({ fileId: name, fileName: name, ...scoped }, context), null, name);
+  }
+  assert.ok(scoreCandidate({ fileId: "ok", fileName: "code-geass10.srt", ...scoped }, context));
+  assert.equal(looseEpisodeNumber("Show.1080p.WEB.x264.srt"), undefined);
+  assert.equal(looseEpisodeNumber("Show.2160p.HEVC.DDP5.1.srt"), undefined);
+  assert.equal(looseEpisodeNumber("SUBDL::show-arabic-3258002.zip"), undefined);
+  // A number that is part of the title is not an episode number.
+  const mob = series("", 1, 1, { imdbId: "5897304", title: "Mob Psycho 100" });
+  mob.extra.filename = "";
+  assert.ok(scoreCandidate({ fileId: "m", fileName: "Mob Psycho 100.srt", episodeScoped: true, featureDetails: { seasonNumber: 1, episodeNumber: 1 } }, mob));
 });

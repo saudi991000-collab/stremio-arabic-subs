@@ -149,6 +149,22 @@ export function parseReleaseName(filename = "") {
   };
 }
 
+// Trailing episode number in names that carry no SxxEyy / " - 07" marker,
+// e.g. "code-geass13.srt" or "Code Geass 11". Codec, resolution, audio and
+// year tokens are removed first so "x264" or "2160p" never read as episodes.
+export function looseEpisodeNumber(value = "") {
+  const stem = String(value)
+    .replace(/^.*[\\/]/, "")
+    .replace(/\.[a-z0-9]{2,4}$/i, "")
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
+    .replace(/\b(?:2160|1080|720|576|480)[pi]\b/gi, " ")
+    .replace(/[xh][ ._-]?26[45]|hevc|av1|1[02]bit|8bit|e?ac-?3|aac(?:\d(?:[ ._]\d)?)?|ddp?(?:\d(?:[ ._]\d)?)?|dts(?:-?hd)?|truehd|atmos|[257][ ._]1|2[ ._]0/gi, " ")
+    .replace(/(?:19|20)\d{2}/g, " ")
+    .trim();
+  const match = stem.match(/(?:^|[^0-9])0*(\d{1,3})(?:v\d)?$/i);
+  return match ? Number(match[1]) : undefined;
+}
+
 export function parseVideoId(type, id) {
   const parts = String(id).split(":");
   const imdbMatch = parts[0].match(/^tt(\d+)$/i);
