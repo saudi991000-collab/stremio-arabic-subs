@@ -210,6 +210,26 @@ async function findCinemetaByTitle(type, title, fetchImpl) {
   return value;
 }
 
+// The filename-only part of alignMediaToFilename(): no network, so a cached
+// listing can answer with it at once while the full check runs later.
+export function alignMediaLocally(media, extra) {
+  if (!extra?.filename) return media;
+  const parsed = parseReleaseName(extra.filename);
+  let aligned = { ...media, releaseTitle: parsed.title };
+  if (media.type === "series" && Number.isInteger(parsed.episode) && parsed.episode !== media.episode) {
+    aligned = {
+      ...aligned,
+      catalogSeason: media.season,
+      catalogEpisode: media.episode,
+      season: parsed.season ?? media.season ?? 1,
+      episode: parsed.episode,
+      numberingAdjusted: true
+    };
+    if (aligned.imdbId) aligned.id = `tt${aligned.imdbId}:${aligned.season}:${aligned.episode}`;
+  }
+  return aligned;
+}
+
 export async function alignMediaToFilename(media, extra, options = {}) {
   if (!extra?.filename) {
     // Stremio often sends no filename (debrid/HTTP streams). Still learn the
@@ -224,18 +244,7 @@ export async function alignMediaToFilename(media, extra, options = {}) {
     return { ...media, catalogTitle: meta.name || media.catalogTitle || "", ...(absolute ? { absoluteEpisode: absolute } : {}) };
   }
   const parsed = parseReleaseName(extra.filename);
-  let aligned = { ...media, releaseTitle: parsed.title };
-  if (media.type === "series" && Number.isInteger(parsed.episode) && parsed.episode !== media.episode) {
-    aligned = {
-      ...aligned,
-      catalogSeason: media.season,
-      catalogEpisode: media.episode,
-      season: parsed.season ?? media.season ?? 1,
-      episode: parsed.episode,
-      numberingAdjusted: true
-    };
-    if (aligned.imdbId) aligned.id = `tt${aligned.imdbId}:${aligned.season}:${aligned.episode}`;
-  }
+  let aligned = alignMediaLocally(media, extra);
   if (!aligned.imdbId || !parsed.title) return aligned;
   const fetchImpl = options.fetchImpl || fetch;
   // Run both checks together. Relying on the original catalogue lookup first

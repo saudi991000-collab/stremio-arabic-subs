@@ -259,7 +259,9 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
   }
 
   let reference = options.reference || null;
-  if (!reference && options.loadReference !== false) {
+  // With no download allowed (a cached list answering at once) a reference
+  // can never be applied, and loading one cost the player up to 3 s.
+  if (!reference && options.loadReference !== false && options.maxDownloads !== 0) {
     const referenceBudget = Math.min(4500, Math.max(500, (deadline - Date.now()) * 0.45));
     reference = await within(loadReference(context, provider, cache, { signal: controller.signal }), referenceBudget).catch(() => null);
   }
@@ -294,7 +296,10 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
         // new files are inspected. Already-verified files cost nothing.
         if (needsDownload && Number.isFinite(options.maxDownloads)) {
           if (downloadsStarted >= options.maxDownloads) {
-            results[index] = { ...candidate, deepAnalyzed: false, validationPending: true };
+            // An already-verified file stays verified; it is only not re-timed.
+            results[index] = remembered
+              ? finalize(applyVerdict(candidate, remembered))
+              : { ...candidate, deepAnalyzed: false, validationPending: true };
             continue;
           }
           downloadsStarted += 1;

@@ -96,3 +96,26 @@ test("retimes ASS dialogue while preserving colors and positioning", () => {
   assert.match(result, /0:00:02\.50,0:00:04\.50/);
   assert.match(result, /\\an8\\c&H00FFFF&/);
 });
+
+test("a cached listing loads no timing reference and keeps verified files verified", async () => {
+  let downloads = 0;
+  let referenceLookups = 0;
+  const provider = {
+    async download() { downloads += 1; return { buffer: Buffer.from(arabicSrt(30)), fileName: "a.srt" }; },
+    async findTimingReference() { referenceLookups += 1; return null; }
+  };
+  const verdicts = { async get(key) { return key.includes(":subdl:1:") ? { ok: true, actualFormat: "srt", cueCount: 30 } : undefined; }, async set() {} };
+  const cache = { async get() { return undefined; }, async set() {} };
+  const candidates = [
+    { provider: "subdl", fileId: 1, confidence: 80, tier: 2, reasons: [], fileName: "Show.S01E01.srt" },
+    { provider: "subdl", fileId: 2, confidence: 78, tier: 2, reasons: [], fileName: "Show.S01E01.alt.srt" }
+  ];
+  const results = await deepAnalyzeCandidates(candidates, {
+    media: { type: "series", season: 1, episode: 1 },
+    extra: { filename: "Show.S01E01.1080p.WEB-DL.mkv", videoHash: "" }
+  }, provider, cache, { limit: 2, timeoutMs: 2000, maxDownloads: 0, verdicts });
+  assert.equal(referenceLookups, 0);
+  assert.equal(downloads, 0);
+  assert.equal(results.find((item) => item.fileId === 1).deepAnalyzed, true);
+  assert.equal(results.find((item) => item.fileId === 2).validationPending, true);
+});

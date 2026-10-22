@@ -8,7 +8,7 @@ import { readConfig } from "./config.js";
 import { logger } from "./logger.js";
 import { manifest } from "./manifest.js";
 import { parseExtra, parseReleaseName } from "./media.js";
-import { alignMediaToFilename, identityUnresolved, resolveVideoId } from "./id-resolver.js";
+import { alignMediaLocally, alignMediaToFilename, identityUnresolved, resolveVideoId } from "./id-resolver.js";
 import { arabicFansubTeam, rankCandidates, releaseMatched, resultLabel, stableKey } from "./ranker.js";
 import { signSubtitleToken, verifySubtitleToken } from "./token.js";
 import { convertToFormat, detectTextFormat, normalizeSubtitle } from "./subtitle.js";
@@ -677,7 +677,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         }
         // Reuse the media identity resolved the first time. Re-resolving on
         // every request made results depend on transient Cinemeta timeouts.
-        let media = seeded ? undefined : entry?.media;
+        // A seeded answer uses the episode's stored identity plus what the
+        // filename itself says; the Cinemeta checks (several seconds on the
+        // free instance) run with the background refresh instead.
+        let media = seeded ? alignMediaLocally(entry.media, extra) : entry?.media;
         if (!media) {
           const resolvedMedia = await resolveVideoId(type, videoId);
           media = await alignMediaToFilename(resolvedMedia, extra);
@@ -692,7 +695,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           const searchBudget = Math.max(500, Math.max(config.providerSearchTimeoutMs, listingDeadline - Date.now() - 1800));
           entry = await runSearch(key, context, searchBudget);
           if (!entry.complete) scheduleRefreshLater(key, context);
-        } else if (cacheState === "stale" || cacheState === "seeded") {
+        } else if (cacheState === "seeded") {
+          track(runInBackground(async () => {
+            const aligned = await alignMediaToFilename(await resolveVideoId(type, videoId), extra);
+            await scheduleRefresh(key, { media: aligned, extra });
+          }).catch(() => null));
+        } else if (cacheState === "stale") {
           // Serve the best previous result now and refresh in the background.
           scheduleRefresh(key, context);
         }
