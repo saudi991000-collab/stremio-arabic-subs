@@ -604,7 +604,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
 
   // The whole listing computation for one request. Kept separate from the
   // HTTP handler so a finished answer can be rebuilt in the background.
-  async function buildListing(request, type, encodedId, encodedExtra, srtOnly, started, requestId) {
+  async function buildListing(request, type, encodedId, encodedExtra, srtOnly, started, requestId, debug = false) {
     const listingDeadline = started + config.listingDeadlineMs;
     const videoId = decodeURIComponent(encodedId);
     if (videoId.length > 200) throw new Error("Video id is too long");
@@ -802,7 +802,36 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       `${eligible.filter((candidate) => packIds.has(`${candidate.provider}:${candidate.fileId}`)).length}`;
     const status = `ok;src=${sources};packs=${packStatus};candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
     if (media.type === "series") prefetchNextEpisode(type, videoId);
-    return { key, complete: entry.complete, count: subtitles.length, body: { subtitles, cacheMaxAge }, headers: { "Cache-Control": "no-store", "X-Listing-Status": status } };
+    let debugRows;
+    if (debug) {
+      // "?debug=1": what happened to every candidate (owner diagnostics).
+      const id = (candidate) => `${candidate.provider}:${candidate.fileId}`;
+      const preliminaryIds = new Set(preliminary.map(id));
+      const analyzed = new Map(ranked.map((candidate) => [id(candidate), candidate]));
+      const eligibleIds = new Set(eligible.map(id));
+      const listedIds = new Set(selected.map(id));
+      debugRows = await Promise.all(rankedAll.map(async (candidate) => {
+        let stage;
+        const after = analyzed.get(id(candidate));
+        if (listedIds.has(id(candidate))) stage = "listed";
+        else if (!preliminaryIds.has(id(candidate))) stage = isSeasonPack(candidate) ? "pack-not-this-season" : "low-confidence";
+        else if (!after) {
+          const verdict = await verdictStore.get(verdictKey(candidate, context)).catch(() => undefined);
+          stage = verdict && !verdict.ok ? `rejected:${verdict.reason}` : verdict?.ok ? "duplicate-content" : "dropped";
+        } else if (after.downloadFailed) stage = "download-failed";
+        else if (after.validationPending) stage = "pending";
+        else if (!eligibleIds.has(id(candidate))) stage = `not-eligible:conf=${after.confidence}${after.reasons?.includes("timing-mismatch") ? ",timing-mismatch" : ""}`;
+        else stage = "over-limit";
+        return {
+          provider: candidate.provider,
+          file: String(candidate.fileName || candidate.release || "").slice(0, 90),
+          confidence: after?.confidence ?? candidate.confidence,
+          reasons: (after?.reasons || candidate.reasons || []).filter((reason) => !reason.startsWith("q:")).join(","),
+          stage
+        };
+      }));
+    }
+    return { key, complete: entry.complete, count: subtitles.length, body: { subtitles, cacheMaxAge, ...(debugRows ? { debug: debugRows } : {}) }, headers: { "Cache-Control": "no-store", "X-Listing-Status": status } };
   }
 
   // Finished answers per URL. A player asking again (Harbor asks on every
@@ -969,13 +998,15 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       if (subtitleRoute) {
         const [, type, encodedId, encodedExtra = ""] = subtitleRoute;
         const answerKey = `${srtOnly ? "srt" : "all"}|${baseUrl(request, config)}|${url.pathname}`;
-        const ready = config.readyAnswers && !companion.latest() ? readyAnswers.get(answerKey) : undefined;
+        const debug = url.searchParams.get("debug") === "1";
+        const ready = config.readyAnswers && !companion.latest() && !debug ? readyAnswers.get(answerKey) : undefined;
         if (ready && Date.now() - ready.at < 6 * 3600 * 1000) {
           if (ready.epoch !== stateEpoch || !ready.complete) rebuildAnswer(answerKey, ready.build);
           return json(response, 200, ready.body, { ...ready.headers, "X-Listing-Status": `${ready.headers["X-Listing-Status"]};answer=ready;served=${Date.now() - started}` });
         }
         const epoch = stateEpoch;
-        const result = await buildListing(request, type, encodedId, encodedExtra, srtOnly, started, requestId);
+        const result = await buildListing(request, type, encodedId, encodedExtra, srtOnly, started, requestId, debug);
+        if (debug) return json(response, 200, result.body, result.headers);
         // Rebuilds keep only what a URL needs, not the original request.
         const headers = { host: request.headers.host, "x-forwarded-proto": request.headers["x-forwarded-proto"] };
         rememberAnswer(answerKey, result, epoch, () => buildListing({ headers }, type, encodedId, encodedExtra, srtOnly, Date.now(), randomUUID()));
