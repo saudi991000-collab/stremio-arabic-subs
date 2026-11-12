@@ -208,3 +208,15 @@ test("a timing fix from the /timing page reaches every later download", async ()
     assert.equal(bad.status, 400);
   });
 });
+
+test("a verified file the provider filed under this episode needs only 60", async () => {
+  const { verifiedThreshold, strictSeasonPack } = await import("../src/server.js");
+  const { retryableRejection, isTransientError } = await import("../src/deep-analyzer.js");
+  assert.equal(verifiedThreshold({ reasons: ["series", "episode-metadata", "catalog-match"] }, 70), 60);
+  assert.equal(verifiedThreshold({ reasons: ["series", "same-title"] }, 70), 70);
+  assert.equal(strictSeasonPack({ reasons: ["season-pack"], episodeScoped: true }), false);
+  assert.equal(strictSeasonPack({ reasons: ["season-pack"], episodeScoped: false }), true);
+  assert.equal(retryableRejection({ ok: false, reason: "OpenSubtitles.org download failed with HTTP 403" }), true);
+  assert.equal(retryableRejection({ ok: false, reason: "quality:machine" }), false);
+  assert.equal(isTransientError(new Error("download failed with HTTP 403")), true);
+});

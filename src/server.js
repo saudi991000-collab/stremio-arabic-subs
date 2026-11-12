@@ -32,7 +32,7 @@ import { Subf2mProvider } from "./providers/subf2m.js";
 import { YifySubtitlesProvider } from "./providers/yifysubtitles.js";
 import { TvSubtitlesProvider } from "./providers/tvsubtitles.js";
 import { MultiProvider } from "./providers/multi.js";
-import { deepAnalyzeCandidates, isTransientError, normalizedSubtitleCacheKey, verdictKey } from "./deep-analyzer.js";
+import { deepAnalyzeCandidates, isTransientError, normalizedSubtitleCacheKey, retryableRejection, verdictKey } from "./deep-analyzer.js";
 import { isIdentityTransform, retimeSubtitle } from "./timing.js";
 import { TimingMemory } from "./timing-memory.js";
 import {
@@ -333,6 +333,23 @@ function isSeasonPack(candidate) {
 
 // Season packs worth opening: the pack names this season (or the provider
 // says so). "Complete series" archives without a season are left out.
+// A downloaded and verified Arabic file that the provider itself filed under
+// this exact episode is trusted with a lower name score: generic names such as
+// "01 - Pilot-ara.srt" scored 68 and were hidden although they were correct.
+export function verifiedThreshold(candidate, minConfidence = readConfigMin) {
+  const reasons = candidate?.reasons || [];
+  const providerConfirmed = reasons.includes("episode-metadata") && reasons.includes("catalog-match");
+  return providerConfirmed ? Math.min(minConfidence, 60) : minConfidence;
+}
+let readConfigMin = 70;
+
+// Only a pack that the provider did not file under this episode must prove
+// it holds the episode by file name; an episode-scoped result named after
+// its season (Wyzie, SubDL) is a single episode file.
+export function strictSeasonPack(candidate) {
+  return Boolean(candidate?.reasons?.includes("season-pack") && candidate.episodeScoped !== true);
+}
+
 export function seasonPackForEpisode(candidate, media) {
   if (!isSeasonPack(candidate) || media?.type !== "series") return false;
   const name = String(candidate.fileName || candidate.release || "");
@@ -399,6 +416,7 @@ export function buildProviders(config) {
 }
 
 export async function createAddonServer({ config = readConfig(), provider, cache, stores } = {}) {
+  readConfigMin = config.minConfidence;
   const configuredProviders = provider ? [] : buildProviders(config);
   const actualProvider = provider || new MultiProvider(configuredProviders, { providerTimeoutMs: config.providerHardTimeoutMs });
   const expectedProviders = actualProvider.names || [];
@@ -722,7 +740,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       (!isSeasonPack(candidate) || candidate.deepAnalyzed === true)), companionSession?.duration);
     let eligible = requireVerifiedDownload
       ? [
-        ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
+        ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= verifiedThreshold(candidate) && !candidate.reasons?.includes("timing-mismatch")),
         ...usable.filter((candidate) => candidate.deepAnalyzed !== true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch"))
       ]
       : [
@@ -750,6 +768,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         fps: item.fps,
         confidence: item.confidence,
         reasons: (item.reasons || []).filter((reason) => !reason.startsWith("q:")),
+        ...(strictSeasonPack(item) ? { strictPack: true } : {}),
         syncScore: item.syncScore || 0,
         qualityScore: item.qualityScore || 0,
         verified: Boolean(item.deepAnalyzed),
@@ -1024,7 +1043,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           try {
             const tokenContext = payload.context || { media: { season: item.season, episode: item.episode, type: item.episode != null ? "series" : "movie" }, extra: {} };
             const remembered = await verdictStore.get(verdictKey({ provider: item.provider, downloadRef: item.ref }, tokenContext)).catch(() => undefined);
-            if (remembered && remembered.ok === false) throw new Error(`Previously rejected: ${remembered.reason}`);
+            if (remembered && remembered.ok === false && !retryableRejection(remembered)) throw new Error(`Previously rejected: ${remembered.reason}`);
             const key = normalizedSubtitleCacheKey({
               provider: item.provider,
               ref: item.ref,
@@ -1043,7 +1062,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
                 fps: item.fps,
                 preserveFormat: false,
                 allowFormatMismatch: true,
-                requireEpisodeEntry: Boolean(item.reasons?.includes("season-pack"))
+                requireEpisodeEntry: item.strictPack === true
               });
               if (item.episode != null && normalized.analysis.durationSeconds > config.maxSeriesSubtitleSeconds) {
                 throw new Error(`Series subtitle duration is implausible (${Math.round(normalized.analysis.durationSeconds / 60)} minutes)`);

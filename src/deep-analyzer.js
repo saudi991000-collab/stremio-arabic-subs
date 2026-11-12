@@ -27,8 +27,18 @@ function subtitleCacheKey(candidate, context) {
 // results (one cause of "25 results, then 2, then 9").
 export function isTransientError(error) {
   const message = String(error?.message || error);
+  // HTTP 403 from a download is a block of this server (anti-bot, daily
+  // limit), not a verdict on the file: OpenSubtitles.org answered 403 to the
+  // add-on's server and its subtitles were rejected for two weeks.
   return error?.name === "TimeoutError" || error?.name === "AbortError" || error?.retryable === true || error?.rateLimited === true ||
-    /timeout|timed out|aborted|deadline|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket|HTTP 5\d\d|HTTP 429|quota|rate limit/i.test(message);
+    /timeout|timed out|aborted|deadline|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket|HTTP 5\d\d|HTTP 429|HTTP 403|quota|rate limit/i.test(message);
+}
+
+// Rejections stored by 3.6/3.7.0 for reasons that were not about the file
+// (a temporary 403 block, an episode-scoped file mistaken for a season pack)
+// are checked again instead of hiding the subtitle for two weeks.
+export function retryableRejection(verdict) {
+  return Boolean(verdict && verdict.ok === false && /HTTP 403|Season pack does not contain requested episode/i.test(String(verdict.reason || "")));
 }
 
 function contentHash(cues) {
@@ -45,7 +55,7 @@ export async function inspectDownloaded(buffer, candidate, context, options = {}
     fileName: options.fileName || candidate.fileName,
     fps: candidate.fps,
     requireArabic: options.requireArabic !== false,
-    requireEpisodeEntry: Boolean(candidate.reasons?.includes("season-pack")),
+    requireEpisodeEntry: Boolean(candidate.reasons?.includes("season-pack") && candidate.episodeScoped !== true),
     preserveFormat: false,
     allowFormatMismatch: true
   });
@@ -373,7 +383,7 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
         continue;
       }
       const remembered = verdicts ? await verdicts.get(verdictKey(candidate, context)).catch(() => undefined) : undefined;
-      if (remembered && !remembered.ok) {
+      if (remembered && !remembered.ok && !retryableRejection(remembered)) {
         results[index] = null;
         continue;
       }
