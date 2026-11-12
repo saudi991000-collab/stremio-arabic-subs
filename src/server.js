@@ -664,6 +664,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     logger.info("subtitle listing search ready", { requestId, candidates: candidates.length, cache: cacheState, complete: entry.complete, elapsedMs: Date.now() - started });
     mark("search");
     let ranked = rankCandidates(candidates, context, config);
+    const rankedAll = ranked;
     mark("rank");
     const fallbackConfidence = Math.max(45, config.minConfidence - 25);
     const preliminary = ranked.filter((candidate) =>
@@ -789,7 +790,17 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     const cacheMaxAge = entry.complete ? 300 : 0;
     // Counts only (no ids, keys or names): lets the owner see why a list
     // is short without access to the hosting logs.
-    const status = `ok;candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
+    // Per-source counts and season-pack progress (no names or ids), so a short
+    // list can be explained from the response header alone.
+    const sources = Object.entries(entry.providers || {})
+      .map(([id, item]) => `${id}:${item.status}:${item.count ?? 0}${item.reason ? `:${String(item.reason).replace(/[^\w .-]/g, " ").slice(0, 40)}` : ""}`)
+      .join(",");
+    const packs = rankedAll.filter(isSeasonPack);
+    const packIds = new Set(packs.map((candidate) => `${candidate.provider}:${candidate.fileId}`));
+    const packStatus = `${packs.length}/${packs.filter((candidate) => seasonPackForEpisode(candidate, media)).length}/` +
+      `${ranked.filter((candidate) => packIds.has(`${candidate.provider}:${candidate.fileId}`) && candidate.deepAnalyzed).length}/` +
+      `${eligible.filter((candidate) => packIds.has(`${candidate.provider}:${candidate.fileId}`)).length}`;
+    const status = `ok;src=${sources};packs=${packStatus};candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
     if (media.type === "series") prefetchNextEpisode(type, videoId);
     return { key, complete: entry.complete, count: subtitles.length, body: { subtitles, cacheMaxAge }, headers: { "Cache-Control": "no-store", "X-Listing-Status": status } };
   }
