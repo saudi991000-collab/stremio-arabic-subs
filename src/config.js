@@ -60,6 +60,13 @@ export function readConfig(env = process.env) {
     backgroundValidation: bool(env.BACKGROUND_VALIDATION, true),
     backgroundValidationTimeoutMs: int(env.BACKGROUND_VALIDATION_TIMEOUT_MS, 25000, 2000, 120000),
     syncMinConfidence: float(env.SYNC_MIN_CONFIDENCE, 0.6, 0.3, 0.99),
+    // Timing corrections are shared across devices for this long.
+    timingMemoryTtlSeconds: int(env.TIMING_MEMORY_DAYS, 120, 1, 365) * 86400,
+    // Key for the /timing page from outside this computer; without it the
+    // page only works on the computer running the add-on.
+    timingFixKey: String(env.TIMING_FIX_KEY || "").trim(),
+    // Extra English/Arabic references compared before a correction is trusted.
+    timingReferences: int(env.TIMING_REFERENCES, 3, 1, 4),
     ffprobePath: env.STREMIO_FFPROBE_PATH || (localPrograms ? path.join(localPrograms, "ffprobe.exe") : "ffprobe"),
     ffmpegPath: env.STREMIO_FFMPEG_PATH || (localPrograms ? path.join(localPrograms, "ffmpeg.exe") : "ffmpeg"),
     whisperPath: path.resolve(env.WHISPER_PATH || "tools/whisper/bin/Release/whisper-cli.exe"),

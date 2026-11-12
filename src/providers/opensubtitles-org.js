@@ -112,6 +112,29 @@ export class OpenSubtitlesOrgProvider {
     return [...unique.values()];
   }
 
+  // Several English files for the same video (exact hash first, then the
+  // closest release names). OpenSubtitles.org has no download quota, so it
+  // supplies the extra references compared before a correction is trusted.
+  async findTimingReferences(context, { signal, limit = 2 } = {}) {
+    const found = [];
+    if (context.extra.videoHash && context.extra.videoSize) {
+      const rows = await this.query({ moviebytesize: String(context.extra.videoSize), moviehash: context.extra.videoHash, sublanguageid: "eng" }, signal).catch(() => []);
+      found.push(...rows.map((row) => mapRow(row, context, { language: "eng" })).filter((item) => item?.hashMatch && !item.machineTranslated)
+        .sort((a, b) => b.downloadCount - a.downloadCount)
+        .map((item) => ({ ...item, language: "en", timingReferenceKind: "exact-hash" })));
+    }
+    if (found.length < limit && context.media.imdbId && context.extra.filename) {
+      const rows = await this.query(this.scope(context, "eng"), signal).catch(() => []);
+      found.push(...rows.map((row) => mapRow(row, context, { language: "eng" })).filter((item) => item && !item.machineTranslated)
+        .map((candidate) => ({ candidate, score: referenceReleaseScore(candidate, context) }))
+        .filter((item) => item.score >= 45)
+        .sort((a, b) => b.score - a.score || b.candidate.downloadCount - a.candidate.downloadCount)
+        .map((item) => ({ ...item.candidate, language: "en", timingReferenceKind: "release", timingReferenceReleaseScore: item.score })));
+    }
+    const seen = new Set();
+    return found.filter((item) => !seen.has(item.fileId) && seen.add(item.fileId)).slice(0, limit);
+  }
+
   async findTimingReference(context, { signal } = {}) {
     if (context.extra.videoHash && context.extra.videoSize) {
       const rows = await this.query({ moviebytesize: String(context.extra.videoSize), moviehash: context.extra.videoHash, sublanguageid: "eng" }, signal).catch(() => []);

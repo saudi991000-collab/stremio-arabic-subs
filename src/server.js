@@ -2,7 +2,7 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { readConfig } from "./config.js";
 import { logger } from "./logger.js";
@@ -34,6 +34,7 @@ import { TvSubtitlesProvider } from "./providers/tvsubtitles.js";
 import { MultiProvider } from "./providers/multi.js";
 import { deepAnalyzeCandidates, isTransientError, normalizedSubtitleCacheKey, verdictKey } from "./deep-analyzer.js";
 import { isIdentityTransform, retimeSubtitle } from "./timing.js";
+import { TimingMemory } from "./timing-memory.js";
 import {
   CompanionRegistry,
   discoverWindowsStremioHlsSession,
@@ -326,6 +327,20 @@ function fallbackCandidates(eligible, candidate, extension, limit) {
   return selected;
 }
 
+function isSeasonPack(candidate) {
+  return Boolean(candidate?.reasons?.includes("season-pack"));
+}
+
+// Season packs worth opening: the pack names this season (or the provider
+// says so). "Complete series" archives without a season are left out.
+export function seasonPackForEpisode(candidate, media) {
+  if (!isSeasonPack(candidate) || media?.type !== "series") return false;
+  const name = String(candidate.fileName || candidate.release || "");
+  const season = candidate.featureDetails?.seasonNumber ?? parseReleaseName(name).season ??
+    name.match(/(?:^|[^a-z0-9])(?:season[ ._-]*|s)0*(\d{1,2})(?![0-9]|[ ._-]*(?:e|ep|x)\d)/i)?.[1];
+  return season != null && Number(season) === Number(media.season);
+}
+
 export function timingTransform(candidate, minConfidence = 0.6) {
   const score = Number(candidate?.timingScore);
   if (!candidate || candidate.reasons?.includes("exact-hash") || !Number.isFinite(score) || score < minConfidence) return undefined;
@@ -398,6 +413,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   }
   const searchStore = stores?.search || new JsonStore({ directory: config.cacheDirectory, namespace: "search", ttlSeconds: config.searchStaleSeconds, remote });
   const verdictStore = stores?.verdicts || new JsonStore({ directory: config.cacheDirectory, namespace: "verdicts", ttlSeconds: config.verdictTtlSeconds, remote });
+  const timingStore = stores?.timing || new JsonStore({ directory: config.cacheDirectory, namespace: "timing", ttlSeconds: config.timingMemoryTtlSeconds, remote });
+  const timingMemory = new TimingMemory(timingStore);
   const companion = new CompanionRegistry();
   const mediaAnalyzer = new LocalMediaAnalyzer({
     ffprobePath: config.ffprobePath,
@@ -421,6 +438,27 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     allowBilingual: config.allowBilingual,
     preferHearingImpaired: config.preferHearingImpaired
   };
+
+  // Corrections found now are kept for every later request and device; a
+  // cached listing (no new downloads) can then still serve corrected files.
+  function rememberTimings(context, candidates) {
+    for (const candidate of candidates) {
+      const transform = timingTransform(candidate, config.syncMinConfidence);
+      if (!transform) continue;
+      track(timingMemory.rememberAuto(context, { provider: candidate.provider || "opensubtitles", ref: candidate.downloadRef ?? candidate.fileId }, transform));
+    }
+  }
+
+  function timingAccessAllowed(request, url) {
+    const supplied = String(request.headers["x-timing-key"] || url.searchParams.get("key") || "");
+    if (config.timingFixKey && supplied) {
+      const a = Buffer.from(createHash("sha256").update(supplied).digest("hex"));
+      const b = Buffer.from(createHash("sha256").update(config.timingFixKey).digest("hex"));
+      if (timingSafeEqual(a, b)) return true;
+    }
+    // Without a key only the computer running the add-on may use the page.
+    return isLoopbackAddress(request.socket.remoteAddress) && !request.headers["x-forwarded-for"];
+  }
 
   function track(promise) {
     const task = promise.catch((error) => logger.warn("background task failed", { reason: error?.message || String(error) }));
@@ -506,7 +544,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     if (validations.has(key)) return validations.get(key);
     const work = track(runInBackground(async () => {
       const ranked = rankCandidates(entry.candidates, context, config)
-        .filter((candidate) => candidate.confidence >= Math.max(45, config.minConfidence - 25) && !candidate.reasons?.includes("season-pack"));
+        .filter((candidate) => isSeasonPack(candidate) ? seasonPackForEpisode(candidate, context.media) : candidate.confidence >= Math.max(45, config.minConfidence - 25));
       await deepAnalyzeCandidates(ranked, context, actualProvider, actualCache, {
         limit: Math.min(30, ranked.length),
         timeoutMs: config.backgroundValidationTimeoutMs,
@@ -629,7 +667,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     mark("rank");
     const fallbackConfidence = Math.max(45, config.minConfidence - 25);
     const preliminary = ranked.filter((candidate) =>
-      candidate.confidence >= fallbackConfidence && !candidate.reasons?.includes("season-pack")
+      isSeasonPack(candidate) ? seasonPackForEpisode(candidate, media) : candidate.confidence >= fallbackConfidence
     );
     const companionBudget = Math.max(0, Math.min(config.companionWaitMs, listingDeadline - Date.now() - 1000));
     let companionSession = companionBudget > 0 ? await companion.waitForRecent(companionBudget) : companion.latest();
@@ -671,12 +709,16 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       ranked = preliminary;
     }
     mark("deep");
+    rememberTimings(context, ranked);
     if (ranked.some((candidate) => !candidate.deepAnalyzed)) scheduleValidation(key, entry, context);
     const requireVerifiedDownload = config.validateBeforeListing && typeof actualProvider.download === "function";
     // A provider whose daily download quota is used up cannot deliver
     // its files; listing them only produces "Failed to load" in Stremio.
     const unavailable = (candidate) => Boolean(actualProvider.byId?.get(candidate.provider)?.isQuotaExhausted?.());
-    const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed && !unavailable(candidate)), companionSession?.duration);
+    // A season pack is listed only after its archive was opened and the
+    // requested episode was found inside it.
+    const usable = dropDuplicatesAndOutliers(ranked.filter((candidate) => candidate.confidence >= 5 && !candidate.downloadFailed && !unavailable(candidate) &&
+      (!isSeasonPack(candidate) || candidate.deepAnalyzed === true)), companionSession?.duration);
     let eligible = requireVerifiedDownload
       ? [
         ...usable.filter((candidate) => candidate.deepAnalyzed === true && candidate.confidence >= config.minConfidence && !candidate.reasons?.includes("timing-mismatch")),
@@ -864,6 +906,31 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         }
         return json(response, 404, { error: "Not found" }, corsHeaders);
       }
+      if (url.pathname === "/timing" || url.pathname.startsWith("/timing/")) {
+        if (url.pathname === "/timing" && request.method === "GET") {
+          const page = await readFile(path.join(moduleDirectory, "../public/timing.html"), "utf8");
+          response.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            ...SECURITY_HEADERS,
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+          });
+          return response.end(page);
+        }
+        if (!timingAccessAllowed(request, url)) return json(response, 403, { error: "Timing key required" }, { "Access-Control-Allow-Origin": undefined, "Cache-Control": "no-store" });
+        if (url.pathname === "/timing/recent" && request.method === "GET") {
+          return json(response, 200, { recent: await timingMemory.recent() }, { "Access-Control-Allow-Origin": undefined, "Cache-Control": "no-store" });
+        }
+        if (url.pathname === "/timing/fix" && request.method === "POST") {
+          const body = await readJsonBody(request, 2048);
+          const seconds = Number(body.seconds);
+          if (!body.reset && (!Number.isFinite(seconds) || Math.abs(seconds) > 600)) return json(response, 400, { error: "seconds must be between -600 and 600" }, { "Access-Control-Allow-Origin": undefined });
+          const result = await timingMemory.fix(String(body.key || ""), String(body.item || ""), { seconds, reset: Boolean(body.reset) });
+          logger.info("timing corrected by user", { seconds: body.reset ? "reset" : seconds });
+          return json(response, 200, { ok: true, ...result }, { "Access-Control-Allow-Origin": undefined, "Cache-Control": "no-store" });
+        }
+        return json(response, 404, { error: "Not found" }, { "Access-Control-Allow-Origin": undefined });
+      }
       if (request.method !== "GET" && request.method !== "HEAD") return json(response, 405, { error: "Method not allowed" });
       if (url.pathname === "/health") {
         return json(response, 200, {
@@ -933,7 +1000,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
                 outputExtension: payload.extension,
                 fps: item.fps,
                 preserveFormat: false,
-                allowFormatMismatch: true
+                allowFormatMismatch: true,
+                requireEpisodeEntry: Boolean(item.reasons?.includes("season-pack"))
               });
               if (item.episode != null && normalized.analysis.durationSeconds > config.maxSeriesSubtitleSeconds) {
                 throw new Error(`Series subtitle duration is implausible (${Math.round(normalized.analysis.durationSeconds / 60)} minutes)`);
@@ -964,6 +1032,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
               extension = converted.extension;
             }
             let transform = item.transform;
+            const savedTiming = payload.context ? await within(timingMemory.lookup(payload.context, item), 1500, {}).catch(() => ({})) : {};
+            if (!transform && savedTiming.auto) transform = savedTiming.auto;
             if (!transform && payload.context && !item.reasons?.includes("exact-hash")) {
               let session = companion.latest();
               if (!session && process.platform === "win32") {
@@ -996,8 +1066,17 @@ export async function createAddonServer({ config = readConfig(), provider, cache
                     preferences
                   }).catch(() => [candidate]);
                   transform = timingTransform(analyzed[0], config.syncMinConfidence);
+                  if (transform) track(timingMemory.rememberAuto(payload.context, item, transform));
                 }
               }
+            }
+            // A correction typed in on the /timing page wins over everything.
+            if (savedTiming.manual) transform = savedTiming.manual;
+            if (payload.context) {
+              const label = (() => {
+                try { return decodeURIComponent(url.pathname.split("/").slice(3).join("/").replace(/\.(srt|vtt|ass|ssa)$/i, "")); } catch { return ""; }
+              })();
+              track(timingMemory.recordServed(payload.context, item, transform, label.replace(/[-_]+/g, " ")));
             }
             if (transform && !isIdentityTransform(transform)) {
               normalizedBuffer = Buffer.from(retimeSubtitle(normalizedBuffer.toString("utf8"), extension, transform), "utf8");
@@ -1012,7 +1091,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
               });
             }
             const contentType = extension === "vtt" ? "text/vtt" : extension === "ass" || extension === "ssa" ? "text/x-ssa" : "application/x-subrip";
-            response.writeHead(200, { "Content-Type": `${contentType}; charset=utf-8`, "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=21600", ...SECURITY_HEADERS });
+            response.writeHead(200, { "Content-Type": `${contentType}; charset=utf-8`, "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300", ...SECURITY_HEADERS });
             return response.end(request.method === "HEAD" ? undefined : normalizedBuffer);
           } catch (error) {
             lastError = error;
@@ -1049,7 +1128,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const reason = String(error?.message || "error").replace(/[^\w .:-]/g, " ").slice(0, 120);
         return json(response, 200, { subtitles: [], cacheMaxAge: 0 }, { "Cache-Control": "no-store", "X-Listing-Status": `error;${reason};ms=${Date.now() - started}` });
       }
-      const safeMessage = /token|extension|too long|too large|Only IMDb/i.test(error.message) ? error.message : "Request failed";
+      const safeMessage = /token|extension|too long|too large|Only IMDb|Unknown subtitle/i.test(error.message) ? error.message : "Request failed";
       return json(response, /missing|quota/i.test(error.message) ? 503 : 400, { error: safeMessage, requestId });
     }
   });
@@ -1071,12 +1150,13 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     retryTimers.clear();
     await Promise.allSettled([...backgroundTasks]);
     await Promise.allSettled([...storeLocks.values()]);
-    await Promise.allSettled([searchStore.flush?.(), verdictStore.flush?.()]);
+    await Promise.allSettled([searchStore.flush?.(), verdictStore.flush?.(), timingStore.flush?.()]);
   };
   server.on("close", () => {
     for (const timer of retryTimers) clearTimeout(timer);
   });
-  server.stores = { search: searchStore, verdicts: verdictStore };
+  server.stores = { search: searchStore, verdicts: verdictStore, timing: timingStore };
+  server.timingMemory = timingMemory;
   return server;
 }
 

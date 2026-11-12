@@ -38,6 +38,16 @@ function safeDetailPath(value) {
   return /^\/subtitles\/[a-z0-9-]+\/arabic\/\d+(?:\/download)?$/i.test(path) ? path : null;
 }
 
+// "Show S01 1080p", "Show Season 1", "Show S01 01-11" (no single episode).
+export function isSeasonPackName(name, season) {
+  const value = String(name || "");
+  const parsed = parseReleaseName(value);
+  if (parsed.season != null && parsed.episode != null && !/\b\d{1,3}\s*[-~]\s*\d{1,3}\b/.test(value)) return false;
+  if (/\bs\d{1,2}[ ._-]*e\d{1,3}\b|\b\d{1,2}x\d{1,3}\b/i.test(value)) return false;
+  const found = value.match(/(?:^|[^a-z0-9])(?:season[ ._-]*|s)0*(\d{1,2})(?![0-9])/i);
+  return Boolean(found) && Number(found[1]) === Number(season);
+}
+
 function parseRows(html, context, title) {
   const blocks = String(html).split(/(?=<li\s+class=["']item\b)/i).slice(1);
   const seen = new Set();
@@ -50,18 +60,24 @@ function parseRows(html, context, title) {
     const scroll = block.match(/<ul\s+class=["'][^"']*scrolllist[^"']*["'][^>]*>([\s\S]*?)<\/ul>/i)?.[1] || "";
     const releases = [...scroll.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((match) => cleanHtml(match[1])).filter(Boolean);
     let release = releases[0] || `${title}.Subf2m.${path.split("/").pop()}`;
+    let pack = false;
     if (context.media.type === "series") {
       const exact = releases.find((name) => {
         const parsed = parseReleaseName(name);
         return parsed.season === Number(context.media.season) && parsed.episode === Number(context.media.episode);
       });
-      if (!exact) continue;
-      release = exact;
+      // Season pages also carry whole-season archives ("S01 1080p NF",
+      // "S01 01-11"); they are opened later and kept only if the episode
+      // is inside.
+      const seasonPack = !exact && releases.find((name) => isSeasonPackName(name, context.media.season));
+      if (!exact && !seasonPack) continue;
+      release = exact || seasonPack;
+      pack = !exact;
     }
     const rate = block.match(/<span\s+class=["'][^"']*rate\s+([^"']+)["']/i)?.[1] || "";
     const uploader = cleanHtml(block.match(/<p\s+class=["'][^"']*comment-owner[^"']*["'][^>]*>([\s\S]*?)<\/p>/i)?.[1] || "").slice(0, 80);
     const comment = cleanHtml(block.match(/<p\s+class=["'][^"']*comment-text[^"']*["'][^>]*>([\s\S]*?)<\/p>/i)?.[1] || "").slice(0, 300);
-    rows.push({ path, release, uploader, comment, rating: /good/i.test(rate) ? 8 : /neutral/i.test(rate) ? 4 : /bad/i.test(rate) ? 0 : 2 });
+    rows.push({ path, release, pack, uploader, comment, rating: /good/i.test(rate) ? 8 : /neutral/i.test(rate) ? 4 : /bad/i.test(rate) ? 0 : 2 });
   }
   return rows;
 }
@@ -80,6 +96,22 @@ async function fetchPage(path, signal) {
   return response.status === 404 ? "" : response.text();
 }
 
+// Picks the title page from Subf2m search results: for a series, the page of
+// the requested season ("...-first-season", "...--third-season").
+export function pickTitlePath(html, title, context) {
+  const wanted = slugify(title).replace(/^the-/, "");
+  if (!wanted) return null;
+  const paths = [...new Set([...String(html).matchAll(/href=["'](\/subtitles\/[a-z0-9-]+)["']/gi)].map((match) => match[1].toLowerCase()))]
+    .filter((path) => !path.startsWith("/subtitles/searchbytitle"));
+  const base = (path) => path.slice("/subtitles/".length).replace(/^the-/, "").replace(/-+/g, "-");
+  if (context.media.type === "series") {
+    const ordinal = ORDINALS[Number(context.media.season)];
+    if (!ordinal) return null;
+    return paths.find((path) => base(path) === `${wanted}-${ordinal}-season`) || null;
+  }
+  return paths.find((path) => base(path) === wanted) || null;
+}
+
 export class Subf2mProvider {
   constructor() { this.id = "subf2m"; }
 
@@ -93,6 +125,12 @@ export class Subf2mProvider {
     const settled = await Promise.allSettled(paths.map((path) => fetchPage(path, signal)));
     if (settled.every((item) => item.status === "rejected")) throw settled[0].reason;
     const pages = settled.map((item) => item.status === "fulfilled" ? item.value : "");
+    // Guessed addresses miss many titles ("the-king-of-queens--first-season"):
+    // when none of them exists, ask Subf2m's own title search.
+    if (pages.every((html) => !html)) {
+      const found = await this.searchTitle(title, context, signal).catch(() => null);
+      if (found) pages.push(await fetchPage(`${found}/arabic`, signal).catch(() => ""));
+    }
     const seen = new Set();
     return pages.flatMap((html) => parseRows(html, context, title)).filter((row) => {
       if (seen.has(row.path)) return false;
@@ -109,7 +147,7 @@ export class Subf2mProvider {
       language: "ar",
       hashMatch: false,
       catalogMatch: true,
-      episodeScoped: context.media.type === "series",
+      episodeScoped: context.media.type === "series" && !row.pack,
       rating: row.rating,
       downloadCount: 0,
       fromTrusted: row.rating >= 8,
@@ -118,9 +156,14 @@ export class Subf2mProvider {
       machineTranslated: false,
       featureDetails: {
         seasonNumber: context.media.type === "series" ? Number(context.media.season) : undefined,
-        episodeNumber: context.media.type === "series" ? Number(context.media.episode) : undefined
+        episodeNumber: context.media.type === "series" && !row.pack ? Number(context.media.episode) : undefined
       }
     }));
+  }
+
+  async searchTitle(title, context, signal) {
+    const html = await fetchPage(`/subtitles/searchbytitle?query=${encodeURIComponent(title)}`, signal);
+    return pickTitlePath(html, title, context);
   }
 
   async download(ref, { signal } = {}) {

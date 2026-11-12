@@ -13,6 +13,8 @@ services:
         value: 0.0.0.0
       - key: URL_TOKEN_SECRET
         generateValue: true
+      - key: TIMING_FIX_KEY
+        sync: false
       - key: OPENSUBTITLES_API_KEY
         sync: false
       - key: OPENSUBTITLES_USERNAME

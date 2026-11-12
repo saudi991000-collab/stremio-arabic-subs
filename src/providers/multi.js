@@ -119,6 +119,29 @@ export class MultiProvider {
     return provider.download(item.ref, options);
   }
 
+  // Up to `limit` English references: OpenSubtitles.com gives at most one
+  // (its downloads are rationed), OpenSubtitles.org the rest.
+  async findTimingReferences(context, options = {}) {
+    const limit = Math.max(1, Number(options.limit) || 3);
+    const primary = this.byId.get("opensubtitles");
+    const secondary = this.byId.get("opensubtitles-org");
+    const [first, more] = await Promise.all([
+      typeof primary?.findTimingReference === "function" ? primary.findTimingReference(context, options).catch(() => null) : null,
+      typeof secondary?.findTimingReferences === "function"
+        ? secondary.findTimingReferences(context, { ...options, limit }).catch(() => [])
+        : typeof secondary?.findTimingReference === "function" ? secondary.findTimingReference(context, options).then((one) => one ? [one] : []).catch(() => []) : []
+    ]);
+    const rank = (item) => item.timingReferenceKind === "exact-hash" ? 2 : 1;
+    const all = [...(first ? [first] : []), ...more].sort((a, b) => rank(b) - rank(a));
+    const seen = new Set();
+    return all.filter((item) => {
+      const name = String(item.fileName || item.release || item.fileId).toLowerCase();
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    }).slice(0, limit);
+  }
+
   async findTimingReference(context, options = {}) {
     for (const id of ["opensubtitles", "opensubtitles-org"]) {
       const provider = this.byId.get(id);

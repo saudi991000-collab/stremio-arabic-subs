@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalizeSubtitle } from "./subtitle.js";
-import { alignTimelines, compareSpeechActivity, compareTimelines, inspectStyling, parseTimeline } from "./timing.js";
+import { alignTimelines, compareSpeechActivity, compareTimelines, inspectStyling, mapTime, parseTimeline } from "./timing.js";
 import { assessSubtitle, extractCues } from "./quality.js";
 
 export { compareSpeechActivity, compareTimelines };
@@ -45,6 +45,7 @@ export async function inspectDownloaded(buffer, candidate, context, options = {}
     fileName: options.fileName || candidate.fileName,
     fps: candidate.fps,
     requireArabic: options.requireArabic !== false,
+    requireEpisodeEntry: Boolean(candidate.reasons?.includes("season-pack")),
     preserveFormat: false,
     allowFormatMismatch: true
   });
@@ -90,6 +91,77 @@ export async function loadReference(context, provider, cache, options = {}) {
   return { ...loaded, kind: candidate.timingReferenceKind, source: `subtitle-${candidate.timingReferenceKind}` };
 }
 
+// Several references for the same video. Each one is loaded on its own;
+// one that fails to download is simply left out.
+export async function loadReferences(context, provider, cache, options = {}) {
+  if (!context.extra.videoHash && !context.extra.filename) return [];
+  if (typeof provider.findTimingReferences !== "function") {
+    const single = await loadReference(context, provider, cache, options).catch(() => null);
+    return single ? [single] : [];
+  }
+  const found = await provider.findTimingReferences(context, { signal: options.signal, limit: options.limit || 3 }).catch(() => []);
+  const loaded = await Promise.all(found.map((candidate) => loadNormalized(candidate, context, provider, cache, { requireArabic: false, signal: options.signal })
+    .then((item) => ({ ...item, kind: candidate.timingReferenceKind, source: `subtitle-${candidate.timingReferenceKind}` }))
+    .catch(() => null)));
+  return loaded.filter(Boolean);
+}
+
+const EXACT_REFERENCE_KINDS = ["exact-hash", "embedded", "embedded-sample", "audio-whisper"];
+
+function referenceRank(kind) {
+  return EXACT_REFERENCE_KINDS.includes(kind) ? 2 : kind === "vad" ? 0 : 1;
+}
+
+// Median distance (seconds) between where two corrections put the same cues.
+export function transformDistance(a, b, cues) {
+  const starts = cues.map((cue) => cue.start).sort((x, y) => x - y);
+  if (!starts.length) return Infinity;
+  const samples = Array.from({ length: 11 }, (_, index) => starts[Math.min(starts.length - 1, Math.floor(index * (starts.length - 1) / 10))]);
+  const differences = samples.map((value) => Math.abs(mapTime(value, a) - mapTime(value, b))).sort((x, y) => x - y);
+  return differences[Math.floor(differences.length / 2)];
+}
+
+function asTransform(alignment) {
+  return alignment.segments ? { segments: alignment.segments } : { scale: alignment.scale ?? 1, offset: alignment.offset ?? 0 };
+}
+
+// Aligns the candidate against every reference and keeps a correction only
+// when the references agree. Two English files that disagree mean at least
+// one belongs to another cut: no correction is trusted then.
+export function consensusAlignment(references, timeline) {
+  const results = references
+    .filter((reference) => reference?.timeline?.length)
+    .map((reference) => {
+      const kind = reference.kind || reference.candidate?.timingReferenceKind;
+      return { kind, alignment: alignTimelines(reference.timeline, timeline, { windows: reference.windows, kind }) };
+    });
+  if (!results.length) return null;
+  const usable = results.filter((item) => item.alignment.confidence >= 0.35)
+    .sort((a, b) => referenceRank(b.kind) - referenceRank(a.kind) || b.alignment.confidence - a.alignment.confidence);
+  if (!usable.length) {
+    // Keep the strongest negative evidence (a mismatch against the video itself).
+    return { ...results.sort((a, b) => referenceRank(b.kind) - referenceRank(a.kind))[0], agreeing: 0, conflicting: 0 };
+  }
+  const primary = usable[0];
+  const others = usable.slice(1);
+  if (!others.length) return { ...primary, agreeing: 0, conflicting: 0 };
+  const primaryTransform = asTransform(primary.alignment);
+  let agreeing = 0;
+  let conflicting = 0;
+  for (const other of others) {
+    const distance = transformDistance(primaryTransform, asTransform(other.alignment), timeline);
+    if (distance <= 0.35) agreeing += 1;
+    // A weaker kind (an English release file against the video's own audio)
+    // cannot overrule a stronger one, only confirm it.
+    else if (referenceRank(other.kind) >= referenceRank(primary.kind) && other.alignment.confidence >= primary.alignment.confidence * 0.8) conflicting += 1;
+  }
+  let confidence = primary.alignment.confidence;
+  if (conflicting > agreeing) confidence = Math.min(confidence, 0.45);
+  else if (agreeing) confidence = Math.max(confidence, Math.min(0.99, confidence + 0.12 * agreeing));
+  const kind = agreeing && referenceRank(primary.kind) < 2 ? "consensus" : primary.kind;
+  return { kind, alignment: { ...primary.alignment, confidence }, agreeing, conflicting };
+}
+
 function verdictFrom(inspected, assessment, options) {
   return {
     ok: assessment.accepted && !(options.tooLong),
@@ -101,6 +173,7 @@ function verdictFrom(inspected, assessment, options) {
     cueCount: inspected.analysis.cueCount,
     durationSeconds: Math.round(inspected.analysis.durationSeconds),
     contentHash: contentHash(inspected.cues),
+    packEpisodeVerified: Boolean(options.packEpisodeVerified),
     quality: {
       verdict: assessment.verdict,
       humanScore: Number(assessment.humanScore.toFixed(3)),
@@ -119,6 +192,12 @@ function applyVerdict(candidate, verdict) {
     reasons.push("rich-styling");
   }
   if (verdict.quality?.reasons?.length) reasons.push(...verdict.quality.reasons.map((reason) => `q:${reason}`));
+  // The archive was opened and the requested episode was found by name: a
+  // verified season pack is as reliable as a single-episode file.
+  if (reasons.includes("season-pack") && verdict.packEpisodeVerified) {
+    confidence = Math.max(confidence, 72);
+    reasons.push("pack-episode-verified");
+  }
   return {
     ...candidate,
     reasons,
@@ -135,12 +214,16 @@ function applyVerdict(candidate, verdict) {
   };
 }
 
-function applyTiming(candidate, inspected, reference) {
-  if (!reference?.timeline?.length || !inspected?.timeline?.length) return candidate;
-  const kind = reference.kind || reference.candidate?.timingReferenceKind;
-  const alignment = alignTimelines(reference.timeline, inspected.timeline, { windows: reference.windows, kind });
-  const exactReference = ["exact-hash", "embedded", "embedded-sample", "audio-whisper"].includes(kind);
+function applyTiming(candidate, inspected, references) {
+  const list = (Array.isArray(references) ? references : [references]).filter((reference) => reference?.timeline?.length);
+  if (!list.length || !inspected?.timeline?.length) return candidate;
+  const combined = consensusAlignment(list, inspected.timeline);
+  if (!combined) return candidate;
+  const { kind, alignment } = combined;
+  const exactReference = EXACT_REFERENCE_KINDS.includes(kind);
   const reasons = [...candidate.reasons];
+  if (combined.agreeing) reasons.push("timing-consensus");
+  if (combined.conflicting > combined.agreeing) reasons.push("timing-conflict");
   let confidence = candidate.confidence;
   if (alignment.confidence >= 0.75) {
     confidence += exactReference ? 18 : 12;
@@ -258,13 +341,18 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
     }
   }
 
-  let reference = options.reference || null;
+  let references = options.reference ? [options.reference] : [];
   // With no download allowed (a cached list answering at once) a reference
   // can never be applied, and loading one cost the player up to 3 s.
-  if (!reference && options.loadReference !== false && options.maxDownloads !== 0) {
+  if (!references.length && options.loadReference !== false && options.maxDownloads !== 0) {
     const referenceBudget = Math.min(4500, Math.max(500, (deadline - Date.now()) * 0.45));
-    reference = await within(loadReference(context, provider, cache, { signal: controller.signal }), referenceBudget).catch(() => null);
+    references = await within(loadReferences(context, provider, cache, { signal: controller.signal, limit: options.referenceLimit || 3 }), referenceBudget).catch(() => []);
   }
+  const reference = references[0] || null;
+  // Arabic files matched to this exact video by hash are references too.
+  const arabicReferences = [];
+  const bases = new Array(selected.length);
+  const inspections = new Array(selected.length);
   const preferences = options.preferences || {};
   const results = new Array(selected.length);
   let cursor = 0;
@@ -320,7 +408,7 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
           });
           const tooLong = context.media.type === "series" && Number(options.maxSeriesSubtitleSeconds) > 0 &&
             inspected.analysis.durationSeconds > Number(options.maxSeriesSubtitleSeconds);
-          verdict = verdictFrom(inspected, assessment, { tooLong });
+          verdict = verdictFrom(inspected, assessment, { tooLong, packEpisodeVerified: Boolean(candidate.reasons?.includes("season-pack")) });
           await verdicts?.set(verdictKey(candidate, context), verdict);
         }
         if (!verdict.ok) {
@@ -328,7 +416,14 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
           continue;
         }
         let analyzed = applyVerdict(candidate, verdict);
-        if (inspected) analyzed = applyTiming(analyzed, inspected, reference);
+        if (inspected) {
+          bases[index] = analyzed;
+          inspections[index] = inspected;
+          if (candidate.reasons?.includes("exact-hash") && inspected.timeline.length >= 20) {
+            arabicReferences.push({ timeline: inspected.timeline, kind: "exact-hash", source: "arabic-exact-hash" });
+          }
+          analyzed = applyTiming(analyzed, inspected, references);
+        }
         results[index] = finalize(analyzed);
         // Let pending network I/O run between CPU-heavy files in background mode.
         if (options.shouldPause) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -354,6 +449,12 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
   });
   await Promise.all(workers);
   clearTimeout(stopTimer);
+  if (arabicReferences.length) {
+    for (let index = 0; index < selected.length; index += 1) {
+      if (!bases[index] || !results[index] || selected[index].reasons?.includes("exact-hash")) continue;
+      results[index] = finalize(applyTiming(bases[index], inspections[index], [...references, ...arabicReferences]));
+    }
+  }
   controller.abort();
   const analyzed = [];
   for (let index = 0; index < selected.length; index += 1) {

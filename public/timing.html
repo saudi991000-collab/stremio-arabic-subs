@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>تصحيح التوقيت</title>
+<style>
+  :root { --bg:#0d0b18; --card:#171328; --line:#2c2546; --accent:#7c5cff; --text:#fff; --muted:#bdb6d6; --ok:#3ccf91; --bad:#ff6b81; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif; line-height:1.7; }
+  main { max-width:680px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { margin:0 0 4px; font-size:1.5rem; }
+  p.lead { color:var(--muted); margin:0 0 20px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:1.05rem; margin:0 0 12px; }
+  label { display:block; color:var(--muted); font-size:.92rem; margin-bottom:6px; }
+  input[type=password], input[type=number] { width:100%; padding:12px; border-radius:10px; border:1px solid var(--line); background:#0b0912; color:var(--text); font-size:1rem; direction:ltr; }
+  button { font:inherit; cursor:pointer; border:0; border-radius:12px; padding:12px 18px; background:var(--accent); color:#fff; font-weight:700; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--muted); font-weight:500; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row > * { flex:1 1 auto; }
+  ul { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
+  li button { width:100%; text-align:right; background:#0b0912; border:1px solid var(--line); color:var(--text); font-weight:500; padding:12px; }
+  li button[aria-pressed=true] { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent) inset; }
+  .meta { display:block; color:var(--muted); font-size:.85rem; overflow-wrap:anywhere; }
+  .choice { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+  .choice button { background:#0b0912; border:1px solid var(--line); color:var(--text); font-weight:500; }
+  .choice button[aria-pressed=true] { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent) inset; }
+  #status { min-height:1.7em; margin-top:10px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .hint { color:var(--muted); font-size:.85rem; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>تصحيح توقيت الترجمة</h1>
+  <p class="lead">إذا كانت الترجمة متأخرة أو متقدمة عن الكلام، صحّحها هنا مرة واحدة، وتنحفظ لكل أجهزتك (Mi Box، الآيباد، الكمبيوتر).</p>
+
+  <section id="keyBox">
+    <h2>المفتاح</h2>
+    <label for="key">مفتاح التصحيح (TIMING_FIX_KEY)</label>
+    <div class="row">
+      <input id="key" type="password" autocomplete="off">
+      <button id="load" type="button">عرض آخر الترجمات</button>
+    </div>
+    <p class="hint">على الكمبيوتر اللي شغّال عليه الإضافة ما يحتاج مفتاح.</p>
+  </section>
+
+  <section>
+    <h2>١. اختر الترجمة اللي شغّلتها</h2>
+    <ul id="list"><li class="meta">اضغط «عرض آخر الترجمات».</li></ul>
+  </section>
+
+  <section>
+    <h2>٢. وش المشكلة؟</h2>
+    <div class="choice">
+      <button type="button" data-dir="-1" aria-pressed="true">الترجمة متأخرة عن الكلام</button>
+      <button type="button" data-dir="1" aria-pressed="false">الترجمة قبل الكلام</button>
+    </div>
+    <label for="seconds">بكم ثانية؟</label>
+    <input id="seconds" type="number" min="0.1" max="600" step="0.1" value="1" inputmode="decimal">
+    <div class="row" style="margin-top:12px">
+      <button id="apply" type="button" disabled>احفظ التصحيح</button>
+      <button id="reset" type="button" class="ghost" disabled>ألغِ التصحيح</button>
+    </div>
+    <p class="hint">بعد الحفظ، أغلق الترجمة في المشغّل وافتحها من جديد. التصحيح يُضاف على آخر توقيت شفته.</p>
+    <div id="status" role="status"></div>
+  </section>
+</main>
+<script>
+(function () {
+  var keyInput = document.getElementById("key");
+  var list = document.getElementById("list");
+  var status = document.getElementById("status");
+  var apply = document.getElementById("apply");
+  var reset = document.getElementById("reset");
+  var selected = null;
+  var direction = -1;
+  try { keyInput.value = localStorage.getItem("timingKey") || ""; } catch (e) {}
+
+  function say(text, ok) { status.textContent = text; status.className = ok ? "ok" : "bad"; }
+  function headers() {
+    var h = { "Content-Type": "application/json" };
+    if (keyInput.value) h["X-Timing-Key"] = keyInput.value;
+    return h;
+  }
+  function ago(at) {
+    var m = Math.round((Date.now() - at) / 60000);
+    if (m < 1) return "الآن";
+    if (m < 60) return "قبل " + m + " دقيقة";
+    var h = Math.round(m / 60);
+    return h < 48 ? "قبل " + h + " ساعة" : "قبل " + Math.round(h / 24) + " يوم";
+  }
+
+  function render(items) {
+    list.textContent = "";
+    if (!items.length) {
+      var empty = document.createElement("li");
+      empty.className = "meta";
+      empty.textContent = "ما فيه ترجمات مشغّلة مؤخراً. شغّل الحلقة مع الترجمة أولاً.";
+      list.appendChild(empty);
+      return;
+    }
+    items.forEach(function (item) {
+      var li = document.createElement("li");
+      var b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("aria-pressed", "false");
+      var title = document.createElement("strong");
+      var ep = item.season != null && item.episode != null ? " — م" + item.season + " ح" + item.episode : "";
+      title.textContent = (item.title || "بدون عنوان") + ep;
+      var meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = (item.label || "") + " · " + ago(item.at);
+      b.appendChild(title);
+      b.appendChild(meta);
+      b.addEventListener("click", function () {
+        Array.prototype.forEach.call(list.querySelectorAll("button"), function (x) { x.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        selected = item;
+        apply.disabled = false;
+        reset.disabled = false;
+        say("", true);
+      });
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+  }
+
+  document.getElementById("load").addEventListener("click", function () {
+    try { localStorage.setItem("timingKey", keyInput.value); } catch (e) {}
+    say("جاري التحميل…", true);
+    fetch("timing/recent", { headers: headers() }).then(function (r) {
+      if (r.status === 403) throw new Error("المفتاح غلط أو ناقص.");
+      if (!r.ok) throw new Error("تعذّر التحميل.");
+      return r.json();
+    }).then(function (data) { render(data.recent || []); say("", true); })
+      .catch(function (e) { say(e.message, false); });
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll(".choice button"), function (b) {
+    b.addEventListener("click", function () {
+      direction = Number(b.getAttribute("data-dir"));
+      Array.prototype.forEach.call(document.querySelectorAll(".choice button"), function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+    });
+  });
+
+  function send(body, done) {
+    fetch("timing/fix", { method: "POST", headers: headers(), body: JSON.stringify(body) }).then(function (r) {
+      return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || "تعذّر الحفظ."); return data; });
+    }).then(function () { say(done, true); }).catch(function (e) { say(e.message, false); });
+  }
+
+  apply.addEventListener("click", function () {
+    var seconds = Number(document.getElementById("seconds").value);
+    if (!selected || !(seconds > 0) || seconds > 600) { say("اكتب عدد ثواني بين 0.1 و 600.", false); return; }
+    send({ key: selected.key, item: selected.item, seconds: direction * seconds },
+      "انحفظ. أعد فتح الترجمة في المشغّل.");
+  });
+  reset.addEventListener("click", function () {
+    if (!selected) return;
+    send({ key: selected.key, item: selected.item, reset: true }, "انلغى التصحيح اليدوي.");
+  });
+})();
+</script>
+</body>
+</html>

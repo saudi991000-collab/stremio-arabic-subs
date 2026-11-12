@@ -32,13 +32,20 @@ function archiveEntryScore(fileName, selector = {}) {
   if (!Number.isInteger(episode)) return 0;
   const season = Number(selector.season);
   const escapedEpisode = String(episode);
+  // Multi-season archives keep each season in its own folder ("Season 3/01.srt").
+  const folder = fileName.includes("/") || fileName.includes("\\") ? fileName.replace(/[\\/][^\\/]*$/, "") : "";
+  const folderSeason = folder.match(/\b(?:season|s)[ ._-]*0*(\d{1,2})(?!\d)/i);
+  if (folderSeason && Number.isInteger(season) && Number(folderSeason[1]) !== season) return -1;
   const explicit = fileName.match(/s(\d{1,2})[ ._-]*(?:ep?|episode)[ ._-]*0*(\d{1,3})/i) || fileName.match(/\b(\d{1,2})x(\d{1,3})\b/i);
   if (explicit) {
     if (Number.isInteger(season) && Number(explicit[1]) !== season) return -1;
     return Number(explicit[2]) === episode ? 120 : -1;
   }
-  if (new RegExp(`\\b(?:episode|ep|e)[ ._-]*0*${escapedEpisode}\\b`, "i").test(fileName)) return 100;
-  if (new RegExp(`(?:^|[\\s._\\-[\\(])0*${escapedEpisode}(?=$|[\\s._\\-\\]\\)])`, "i").test(fileName)) return 70;
+  // Bare numbers are read from the file name only: a "Season 1/" folder must
+  // not make every file in it look like episode 1.
+  const base = fileName.replace(/^.*[\\/]/, "");
+  if (new RegExp(`\\b(?:episode|ep|e)[ ._-]*0*${escapedEpisode}\\b`, "i").test(base)) return 100;
+  if (new RegExp(`(?:^|[\\s._\\-[\\(])0*${escapedEpisode}(?=$|[\\s._\\-\\]\\)])`, "i").test(base)) return 70;
   return 0;
 }
 
@@ -67,13 +74,20 @@ function preferredMovieEntry(options, selector) {
 export function extractArchive(buffer, selector = {}, depth = 0) {
   const hintedFileName = String(selector.fileName || "subtitle.srt");
   if (buffer.length > MAX_COMPRESSED_BYTES) throw new Error("Compressed subtitle is too large");
+  // A season pack is only usable when the requested episode is a named file
+  // inside the archive; a lone file cannot be proven to be that episode.
+  const packNeedsEntry = selector.requireEpisodeEntry === true && Number.isInteger(Number(selector.episode));
   if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
+    if (packNeedsEntry) throw new Error(`Season pack does not contain requested episode ${selector.episode}`);
     const result = gunzipSync(buffer, { maxOutputLength: MAX_ARCHIVE_ENTRY_BYTES });
     return { buffer: stripAssAttachments(result, hintedFileName), fileName: hintedFileName.replace(/\.gz$/i, "") };
   }
   if (buffer.length >= 4 && buffer.subarray(0, 4).toString("latin1") === "Rar!") throw new Error("RAR subtitle archives are not supported");
   if (buffer.length >= 6 && buffer[0] === 0x37 && buffer[1] === 0x7a && buffer[2] === 0xbc) throw new Error("7z subtitle archives are not supported");
-  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50) return { buffer, fileName: hintedFileName };
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== 0x04034b50) {
+    if (packNeedsEntry && depth === 0) throw new Error(`Season pack does not contain requested episode ${selector.episode}`);
+    return { buffer, fileName: hintedFileName };
+  }
   if (depth > MAX_ARCHIVE_DEPTH) throw new Error("Nested subtitle archives are too deep");
 
   const eocd = findEocd(buffer);
@@ -115,7 +129,7 @@ export function extractArchive(buffer, selector = {}, depth = 0) {
     }
   }
   let entry = options.length > 1 && !Number.isInteger(Number(selector.episode)) ? preferredMovieEntry(options, selector) : options[0];
-  if (options.length > 1 && Number.isInteger(Number(selector.episode))) {
+  if ((options.length > 1 || packNeedsEntry) && Number.isInteger(Number(selector.episode))) {
     const ranked = options
       .map((option) => ({ option, score: archiveEntryScore(option.fileName, selector) }))
       .sort((a, b) => b.score - a.score || a.option.fileName.localeCompare(b.option.fileName));
