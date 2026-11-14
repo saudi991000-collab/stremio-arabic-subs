@@ -51,7 +51,7 @@ const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const embeddedConfigurePage = `<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ترجمة النخبة</title><style>body{margin:0;background:#0d0b18;color:#fff;font-family:system-ui;display:grid;place-items:center;min-height:100vh}.card{max-width:620px;margin:24px;padding:34px;border:1px solid #7c5cff;border-radius:22px;background:#171328;text-align:center}h1{margin-top:0}p{color:#cbc5df;line-height:1.8}.button{display:inline-block;margin:10px;padding:14px 24px;border-radius:14px;background:#7c5cff;color:white;text-decoration:none;font-weight:700}.url{direction:ltr;word-break:break-all;background:#0b0912;padding:12px;border-radius:10px}</style></head>
-<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 25 ترجمة عربية بشرية مرتبة، مع دعم صيغ الترجمة النصية وتحويلها تلقائياً إلى صيغة متوافقة مع Stremio.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><a class="button" href="{{SRT_STREMIO_URL}}">تثبيت نسخة SRT (تلفزيون/آيباد)</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div><p>الإصدار {{VERSION}}</p></main></body></html>`;
+<body><main class="card"><h1>⭐ ترجمة النخبة</h1><p>حتى 30 ترجمة عربية بشرية مرتبة، مع دعم صيغ الترجمة النصية وتحويلها تلقائياً إلى صيغة متوافقة مع Stremio.</p><a class="button" href="{{STREMIO_URL}}">تثبيت في Stremio</a><a class="button" href="{{SRT_STREMIO_URL}}">تثبيت نسخة SRT (تلفزيون/آيباد)</a><p>إذا لم يفتح الزر، انسخ رابط الـManifest:</p><div class="url">{{MANIFEST_URL}}</div><p>الإصدار {{VERSION}}</p></main></body></html>`;
 
 const srtManifest = {
   ...manifest,
@@ -202,6 +202,7 @@ export function detailedResultLabel(candidate, index) {
   const parsed = parseReleaseName(candidate.fileName || candidate.release || "");
   const { matched, team, styled } = badgesFor(candidate);
   const badges = [
+    candidate.chosen === 2 ? "📌" : "",
     candidate.userRating > 0 ? "⭐" : "",
     matched ? resultLabel(candidate) : "",
     team ? "🇸🇦" : "",
@@ -251,6 +252,8 @@ export function sortForDisplay(candidates) {
     .sort((a, b) =>
       // The viewer's own 👍 / 👎 from the /timing page come first.
       (b.candidate.userRating || 0) - (a.candidate.userRating || 0) ||
+      // What the viewer picked before (this episode, then this series' team).
+      (b.candidate.chosen || 0) - (a.candidate.chosen || 0) ||
       // ⚠️ timing goes below the rest; 🎯 breaks ties.
       Number(timingCheck(a.candidate) === "conflict") - Number(timingCheck(b.candidate) === "conflict") ||
       b.badges.count - a.badges.count ||
@@ -294,7 +297,8 @@ function selectDiverseCandidates(candidates, limit) {
 // After inspection: (1) the same file mirrored by several providers (same
 // release name, cue count within 1%, same length) is shown once; (2) a verified
 // subtitle far shorter or longer than the others for the same video (a
-// featurette, a partial file, a different cut) is dropped.
+// featurette, a partial file, a different cut) is dropped, and so is one
+// with a long untranslated stretch.
 export function dropDuplicatesAndOutliers(candidates, videoDurationSeconds) {
   const durations = candidates.filter((item) => item.deepAnalyzed && item.subtitleDurationSeconds > 0).map((item) => item.subtitleDurationSeconds).sort((a, b) => a - b);
   const reference = Number(videoDurationSeconds) > 60 ? Number(videoDurationSeconds) : durations.length >= 4 ? durations[Math.floor(durations.length / 2)] : 0;
@@ -302,8 +306,12 @@ export function dropDuplicatesAndOutliers(candidates, videoDurationSeconds) {
   for (const candidate of candidates) {
     if (reference && candidate.deepAnalyzed && candidate.subtitleDurationSeconds > 0 && !candidate.reasons?.includes("exact-hash")) {
       const ratio = candidate.subtitleDurationSeconds / reference;
-      if (ratio < 0.6 || ratio > 1.5) continue;
+      if (ratio < 0.75 || ratio > 1.5) continue;
     }
+    // Part of the dialogue was never translated (long gap, or far shorter
+    // than the video): not listed.
+    if (candidate.deepAnalyzed && !candidate.reasons?.includes("exact-hash") &&
+      candidate.reasons?.some((reason) => reason === "q:incomplete" || reason === "q:untranslated-gap")) continue;
     const name = normalizeReleaseKey(candidate);
     const duplicate = candidate.deepAnalyzed && kept.some((item) => item.deepAnalyzed && item.provider !== candidate.provider &&
       normalizeReleaseKey(item) === name &&
@@ -464,6 +472,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   const searchStore = stores?.search || new JsonStore({ directory: config.cacheDirectory, namespace: "search", ttlSeconds: config.searchStaleSeconds, remote });
   const verdictStore = stores?.verdicts || new JsonStore({ directory: config.cacheDirectory, namespace: "verdicts", ttlSeconds: config.verdictTtlSeconds, remote });
   const timingStore = stores?.timing || new JsonStore({ directory: config.cacheDirectory, namespace: "timing", ttlSeconds: config.timingMemoryTtlSeconds, remote });
+  // What the viewer picked: the subtitle chosen for each episode, the
+  // translator/team preferred per series, and which series are being watched.
+  const choiceStore = stores?.choices || new JsonStore({ directory: config.cacheDirectory, namespace: "choices", ttlSeconds: 180 * 24 * 3600, remote });
   useAnimeNameStore(stores?.anime || new JsonStore({ directory: config.cacheDirectory, namespace: "anime", ttlSeconds: 30 * 24 * 3600, remote }));
   const timingMemory = new TimingMemory(timingStore);
   const companion = new CompanionRegistry();
@@ -597,7 +608,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       const ranked = rankCandidates(entry.candidates, context, config)
         .filter((candidate) => isSeasonPack(candidate) ? seasonPackForEpisode(candidate, context.media) : candidate.confidence >= Math.max(45, config.minConfidence - 25));
       await deepAnalyzeCandidates(ranked, context, actualProvider, actualCache, {
-        limit: Math.min(30, ranked.length),
+        limit: Math.min(36, ranked.length),
         timeoutMs: config.backgroundValidationTimeoutMs,
         verdicts: verdictStore,
         preferences,
@@ -610,6 +621,79 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     }).finally(() => validations.delete(key)));
     validations.set(key, work);
     return work;
+  }
+
+  // The last episode opened per series (IMDb ids only) moves the warm-up
+  // window forward.
+  const warmer = { wake: () => {} };
+  const watchingNoted = new Map();
+  function noteWatching(videoId) {
+    const match = String(videoId).match(/^(tt\d{5,10}):(\d{1,4}):(\d{1,5})$/);
+    if (!match) return;
+    const [, id, season, episode] = match;
+    if (watchingNoted.get(id) === videoId) return;
+    watchingNoted.set(id, videoId);
+    track(choiceStore.get("watching").catch(() => null).then(async (saved) => {
+      const series = { ...(saved?.series || {}) };
+      series[id] = { season: Number(season), episode: Number(episode), at: Date.now() };
+      // Keep the 20 most recent series watched in the last 60 days.
+      const kept = Object.entries(series)
+        .filter(([, value]) => Date.now() - value.at < 60 * 86400000)
+        .sort((a, b) => b[1].at - a[1].at)
+        .slice(0, 20);
+      await choiceStore.set("watching", { series: Object.fromEntries(kept) });
+      warmer.wake();
+    }));
+  }
+
+  // "Style" of a subtitle: the Arabic team, or else the release group
+  // written in its file name ("[Mugi] Show - 01.ass" -> mugi).
+  function subtitleStyle(item) {
+    const team = arabicFansubTeam({ fileName: item.fileName, release: item.release, provider: item.provider });
+    if (team) return `team:${String(team).toLowerCase()}`;
+    const name = String(item.fileName || item.release || "");
+    const bracket = name.match(/^\s*\[([^\]]{2,30})\]/)?.[1];
+    const group = bracket || parseReleaseName(name).group;
+    return group ? `${item.provider || "opensubtitles"}:group:${String(group).toLowerCase()}` : "";
+  }
+  function mediaKeyId(media) {
+    return media?.imdbId ? `tt${String(media.imdbId).replace(/^tt/, "")}` : String(media?.sourceId || "");
+  }
+  function episodeChoiceKey(media) {
+    const id = mediaKeyId(media);
+    if (!id) return "";
+    return media.type === "series" ? `ep:${id}:${media.season}:${media.episode}` : `movie:${id}`;
+  }
+  function seriesChoiceKey(media) {
+    const id = mediaKeyId(media);
+    return media?.type === "series" && id ? `series:${id}` : "";
+  }
+  // Called when Stremio loads a listed subtitle: the first token item is
+  // the entry the viewer picked (the others are fallbacks).
+  function rememberChoice(payload) {
+    const media = payload?.context?.media;
+    const first = payload?.items?.[0];
+    if (!media || !first) return;
+    const at = Date.now();
+    const episodeKey = episodeChoiceKey(media);
+    const seriesKey = seriesChoiceKey(media);
+    const style = subtitleStyle(first);
+    track(Promise.all([
+      episodeKey ? choiceStore.set(episodeKey, { id: itemId(first), at }) : null,
+      seriesKey && style ? choiceStore.set(seriesKey, { style, at }) : null
+    ]).then(() => {
+      // Prepared answers are rebuilt with the new order.
+      stateEpoch += 1;
+    }));
+  }
+  async function loadChoices(media) {
+    const episodeKey = episodeChoiceKey(media);
+    const seriesKey = seriesChoiceKey(media);
+    const [episode, series] = await Promise.all([
+      episodeKey ? choiceStore.get(episodeKey).catch(() => null) : null,
+      seriesKey ? choiceStore.get(seriesKey).catch(() => null) : null
+    ]);
+    return { episode: episode?.id || "", style: series?.style || "" };
   }
 
   // While an episode is watched, search the next one in the background so its
@@ -789,11 +873,19 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     // colours, italics/bold and top/bottom position (<font color>, {anN}),
     // which Android TV and iPad players render with correct timing.
     if (srtOnly) eligible = eligible.map((candidate) => ({ ...candidate, actualFormat: "srt" }));
-    const ratings = await within(timingMemory.ratings(context), 800, {}).catch(() => ({}));
+    const noChoice = { episode: "", style: "" };
+    const [ratings, choices] = await Promise.all([
+      within(timingMemory.ratings(context), 800, {}).catch(() => ({})),
+      within(loadChoices(media), 800, noChoice).catch(() => noChoice)
+    ]);
     eligible = eligible.map((candidate) => {
-      const rating = ratings[itemId({ provider: candidate.provider || "opensubtitles", ref: candidate.downloadRef ?? candidate.fileId })];
+      const id = itemId({ provider: candidate.provider || "opensubtitles", ref: candidate.downloadRef ?? candidate.fileId });
+      const rating = ratings[id];
       const timingCorrected = Boolean(timingTransform(candidate, config.syncMinConfidence));
-      return rating || timingCorrected ? { ...candidate, userRating: rating || 0, timingCorrected } : candidate;
+      // 📌 the file picked for this episode before; then files by the team or
+      // group the viewer picked last in this series.
+      const chosen = choices.episode && choices.episode === id ? 2 : choices.style && choices.style === subtitleStyle(candidate) ? 1 : 0;
+      return rating || timingCorrected || chosen ? { ...candidate, userRating: rating || 0, timingCorrected, chosen } : candidate;
     });
     const displayRanked = sortForDisplay(eligible);
     const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
@@ -864,7 +956,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       `${ranked.filter((candidate) => packIds.has(`${candidate.provider}:${candidate.fileId}`) && candidate.deepAnalyzed).length}/` +
       `${eligible.filter((candidate) => packIds.has(`${candidate.provider}:${candidate.fileId}`)).length}`;
     const status = `ok;src=${sources};packs=${packStatus};candidates=${candidates.length};ranked=${ranked.length};eligible=${eligible.length};verified=${selected.filter((candidate) => candidate.deepAnalyzed).length};cache=${cacheState};complete=${entry.complete};ms=${Date.now() - started};lag=${Math.round(loopDelay.max / 1e6)};t=${marks.join(",")}`;
-    if (media.type === "series") prefetchNextEpisode(type, videoId);
+    if (media.type === "series") {
+      prefetchNextEpisode(type, videoId);
+      noteWatching(videoId);
+    }
     let debugRows;
     if (debug) {
       // "?debug=1": what happened to every candidate (owner diagnostics).
@@ -1089,6 +1184,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         if (payload.extension !== proxyRoute[2].toLowerCase()) throw new Error("Subtitle extension mismatch");
         let lastError;
         const tokenItems = payload.items || (payload.fileIds || []).map((ref) => ({ provider: "opensubtitles", ref }));
+        if (request.method === "GET") rememberChoice(payload);
         for (const item of tokenItems.slice(0, 8)) {
           try {
             const tokenContext = payload.context || { media: { season: item.season, episode: item.episode, type: item.episode != null ? "series" : "movie" }, extra: {} };
@@ -1259,39 +1355,56 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     retryTimers.add(timer);
   }
 
-  // Background preparation of whole series (WARM_SERIES): every few
-  // minutes, while no listing is being answered and no other background
-  // search runs, the next episode that has no complete list (or an old one)
-  // is searched and verified. A full pass with nothing to do sleeps for hours,
-  // so the shared store is not polled all day.
-  server.startWarmer = ({ series = config.warmSeries, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 6 * 3600000 } = {}) => {
-    if (!series?.length) return null;
-    const episodes = [];
-    let loaded = false;
+  // Background preparation (WARM_SERIES plus every series being watched):
+  // the WARM_EPISODES episodes after the last one opened (or the first ones
+  // of a series not started yet) are searched and verified one at a time,
+  // only while no listing is being answered and no other background search
+  // runs. A full pass with nothing to do sleeps until something new is
+  // watched (or an hour), so the shared store is not polled all day.
+  server.startWarmer = ({ series = config.warmSeries, perSeries = config.warmEpisodes, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 3600000 } = {}) => {
+    const episodeLists = new Map();
     let cursor = 0;
     let checkedSinceWork = 0;
     let sleepUntil = 0;
-    const state = { warmed: 0, checked: 0, episodes: 0, last: null };
-    async function loadEpisodes() {
-      for (const id of series) {
-        const response = await fetchImpl(`https://v3-cinemeta.strem.io/meta/series/${id}.json`, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15000) });
-        if (!response.ok) throw new Error(`Cinemeta HTTP ${response.status}`);
-        const videos = (await response.json())?.meta?.videos || [];
-        videos.filter((video) => Number(video.season) > 0 && Number(video.episode) > 0)
-          .sort((a, b) => a.season - b.season || a.episode - b.episode)
-          .forEach((video) => episodes.push(`${id}:${Number(video.season)}:${Number(video.episode)}`));
+    const state = { warmed: 0, checked: 0, series: 0, episodes: 0, last: null };
+    warmer.wake = () => { sleepUntil = 0; checkedSinceWork = 0; };
+    async function episodesOf(id) {
+      const known = episodeLists.get(id);
+      if (known && Date.now() - known.at < 12 * 3600000) return known.list;
+      const response = await fetchImpl(`https://v3-cinemeta.strem.io/meta/series/${id}.json`, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw new Error(`Cinemeta HTTP ${response.status}`);
+      const list = ((await response.json())?.meta?.videos || [])
+        .filter((video) => Number(video.season) > 0 && Number(video.episode) > 0)
+        .sort((a, b) => a.season - b.season || a.episode - b.episode)
+        .map((video) => `${id}:${Number(video.season)}:${Number(video.episode)}`);
+      episodeLists.set(id, { at: Date.now(), list });
+      return list;
+    }
+    async function queue() {
+      const watching = (await choiceStore.get("watching").catch(() => null))?.series || {};
+      const ids = [...new Set([...series, ...Object.keys(watching)])].filter((id) => /^tt\d{5,10}$/.test(id));
+      const out = [];
+      for (const id of ids) {
+        const list = await episodesOf(id).catch(() => []);
+        const last = watching[id];
+        const at = last ? list.indexOf(`${id}:${last.season}:${last.episode}`) + 1 : 0;
+        out.push(...list.slice(at, at + perSeries));
       }
-      loaded = true;
-      state.episodes = episodes.length;
-      logger.info("warm-up list loaded", { series: series.length, episodes: episodes.length });
+      state.series = ids.length;
+      state.episodes = out.length;
+      return out;
     }
     async function tick() {
       if (Date.now() < sleepUntil || activeListings > 0 || refreshes.size > 0 || validations.size > 0) return;
-      if (!loaded) await loadEpisodes();
-      if (!episodes.length) return;
+      const episodes = await queue();
+      if (!episodes.length) {
+        sleepUntil = Date.now() + idleMs;
+        return;
+      }
       for (let scanned = 0; scanned < 25; scanned += 1) {
+        cursor %= episodes.length;
         const videoId = episodes[cursor];
-        cursor = (cursor + 1) % episodes.length;
+        cursor += 1;
         state.checked += 1;
         const key = searchKey("series", videoId, {});
         const entry = await searchStore.get(key);
@@ -1335,12 +1448,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     retryTimers.clear();
     await Promise.allSettled([...backgroundTasks]);
     await Promise.allSettled([...storeLocks.values()]);
-    await Promise.allSettled([searchStore.flush?.(), verdictStore.flush?.(), timingStore.flush?.()]);
+    await Promise.allSettled([searchStore.flush?.(), verdictStore.flush?.(), timingStore.flush?.(), choiceStore.flush?.()]);
   };
   server.on("close", () => {
     for (const timer of retryTimers) clearTimeout(timer);
   });
-  server.stores = { search: searchStore, verdicts: verdictStore, timing: timingStore };
+  server.stores = { search: searchStore, verdicts: verdictStore, timing: timingStore, choices: choiceStore };
   server.timingMemory = timingMemory;
   return server;
 }

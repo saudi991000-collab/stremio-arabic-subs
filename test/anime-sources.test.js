@@ -61,3 +61,19 @@ test("timing check: 🎯 for video-matched or confirmed timing, ⚠️ for confl
   assert.equal(timingCheck({ reasons: [], timingScore: 0.9, timingReferenceKind: "release" }), "");
   assert.equal(timingCheck({ reasons: ["timing-conflict", "exact-hash"] }), "conflict");
 });
+
+test("quality: a long untranslated stretch is marked, a complete file is not", async () => {
+  const { assessSubtitle } = await import("../src/quality.js");
+  const stamp = (seconds) => {
+    const h = String(Math.floor(seconds / 3600)).padStart(2, "0");
+    const m = String(Math.floor(seconds / 60) % 60).padStart(2, "0");
+    const s = String(Math.floor(seconds % 60)).padStart(2, "0");
+    return `${h}:${m}:${s},000`;
+  };
+  const build = (times) => times.map((t, i) => `${i + 1}\n${stamp(t)} --> ${stamp(t + 2)}\nهذا سطر عربي رقم ${i} من الحوار الكامل هنا\n`).join("\n");
+  const every = (from, to, step) => Array.from({ length: Math.floor((to - from) / step) }, (_, i) => from + i * step);
+  const complete = assessSubtitle(build(every(5, 1400, 6)));
+  assert.ok(!complete.reasons.includes("untranslated-gap"), complete.reasons.join(","));
+  const holed = assessSubtitle(build([...every(5, 500, 6), ...every(1100, 1400, 6)]));
+  assert.ok(holed.reasons.includes("untranslated-gap"), holed.reasons.join(","));
+});

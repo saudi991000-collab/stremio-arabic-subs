@@ -34,7 +34,7 @@ export function readConfig(env = process.env) {
     publicBaseUrl: (env.PUBLIC_BASE_URL || "").replace(/\/$/, ""),
     resultMode: env.RESULT_MODE === "best" ? "best" : "top20",
     minConfidence: int(env.MIN_CONFIDENCE, 70, 0, 100),
-    maxResults: int(env.MAX_RESULTS, 25, 1, 25),
+    maxResults: int(env.MAX_RESULTS, 30, 1, 30),
     downloadFallbacks: int(env.DOWNLOAD_FALLBACKS, 5, 1, 8),
     maxSearchPages: int(env.MAX_SEARCH_PAGES, 3, 1, 10),
     // Candidates downloaded and inspected inside the listing request. Some are
@@ -80,9 +80,10 @@ export function readConfig(env = process.env) {
     // background refresh runs, so a cold or slow provider never empties a list.
     cacheTtlSeconds: int(env.CACHE_TTL_SECONDS, 21600, 60, 604800),
     searchStaleSeconds: int(env.SEARCH_STALE_SECONDS, 604800, 3600, 2592000),
-    // Series whose episode lists are prepared in the background, one episode
-    // at a time while nobody is watching, so the first open is instant.
+    // Series whose next WARM_EPISODES episodes are prepared in the background
+    // (every watched series is added automatically), one at a time while idle.
     warmSeries: list(env.WARM_SERIES ?? "tt0994314,tt0165581").filter((id) => /^tt\d{5,10}$/.test(id)),
+    warmEpisodes: int(env.WARM_EPISODES, 10, 1, 50),
     warmIntervalSeconds: int(env.WARM_INTERVAL_SECONDS, 90, 30, 3600),
     warmRefreshDays: int(env.WARM_REFRESH_DAYS, 3, 1, 6),
     verdictTtlSeconds: int(env.VERDICT_TTL_SECONDS, 1209600, 3600, 7776000),

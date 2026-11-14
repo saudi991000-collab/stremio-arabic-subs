@@ -36,7 +36,7 @@ services:
       - key: RESULT_MODE
         value: top20
       - key: MAX_RESULTS
-        value: "25"
+        value: "30"
       - key: MIN_CONFIDENCE
         value: "70"
       - key: DOWNLOAD_FALLBACKS

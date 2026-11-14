@@ -201,6 +201,19 @@ export function assessSubtitle(text, options = {}) {
     humanScore -= 0.1;
     reasons.push("implausible-cue-density");
   }
+  // A long stretch with no dialogue inside an episode or film usually means
+  // part of it was never translated (e.g. only the first 12 minutes and the
+  // last 5). Song-only/sign cues are counted as dialogue, so this is rare
+  // for complete files.
+  if (minutes >= 15) {
+    const starts = cues.map((cue) => cue.start).sort((a, b) => a - b);
+    let largestGap = 0;
+    for (let index = 1; index < starts.length; index += 1) largestGap = Math.max(largestGap, starts[index] - starts[index - 1]);
+    if (largestGap > Math.max(360, durationSeconds * 0.3)) {
+      humanScore -= 0.2;
+      reasons.push("untranslated-gap");
+    }
+  }
   if (Number(expectedDurationSeconds) > 0) {
     const coverage = durationSeconds / Number(expectedDurationSeconds);
     if (coverage < 0.55) {

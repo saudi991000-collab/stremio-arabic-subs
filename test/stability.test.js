@@ -129,11 +129,11 @@ test("results survive a restart (persistent cache) even when providers then fail
   assert.deepEqual(names(after), names(before));
 });
 
-test("returns up to 25 valid results and never pads the list", async () => {
+test("returns up to 30 valid results and never pads the list", async () => {
   const many = new MultiProvider(["a", "b", "c", "d", "e"].map((id) => fakeProvider(id, 8)));
   const full = await withServer(many, {}, async (base) => listing(base));
-  assert.equal(full.subtitles.length, 25);
-  assert.deepEqual(full.subtitles.map((item) => Number(item.label.split(" ")[0])), Array.from({ length: 25 }, (_, index) => index + 1));
+  assert.equal(full.subtitles.length, 30);
+  assert.deepEqual(full.subtitles.map((item) => Number(item.label.split(" ")[0])), Array.from({ length: 30 }, (_, index) => index + 1));
   const few = await withServer(new MultiProvider([fakeProvider("a", 3)]), {}, async (base) => listing(base));
   assert.equal(few.subtitles.length, 3);
 });
@@ -276,23 +276,54 @@ test("prepares the next episode in the background and serves filename requests f
   });
 });
 
-test("warm-up prepares every episode of a listed series once, then sleeps", async () => {
+test("warm-up prepares the next episodes of each series, and follows what is watched", async () => {
   const provider = fakeProvider("a", 2);
   const fetchImpl = async () => new Response(JSON.stringify({ meta: { videos: [
-    { season: 0, episode: 1 }, { season: 1, episode: 1 }, { season: 1, episode: 2 }
+    { season: 0, episode: 1 }, { season: 1, episode: 1 }, { season: 1, episode: 2 }, { season: 1, episode: 3 }, { season: 1, episode: 4 }
   ] } }), { status: 200 });
   await withServer(provider, {}, async (_base, server) => {
-    const state = server.startWarmer({ series: ["tt1234567"], intervalMs: 40, fetchImpl });
-    const until = Date.now() + 8000;
-    while (Date.now() < until) {
-      const done = await Promise.all(["tt1234567:1:1", "tt1234567:1:2"].map((id) => server.stores.search.get(`search:v8:series:${id}:::`)));
-      if (done.every((entry) => entry?.complete) && state.checked >= 4) break;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.equal(state.episodes, 2);
+    const stored = (id) => server.stores.search.get(`search:v8:series:${id}:::`);
+    const waitFor = async (check) => {
+      const until = Date.now() + 8000;
+      while (Date.now() < until && !(await check())) await new Promise((resolve) => setTimeout(resolve, 40));
+    };
+    const state = server.startWarmer({ series: ["tt1234567"], perSeries: 2, intervalMs: 30, idleMs: 60, fetchImpl });
+    await waitFor(async () => (await stored("tt1234567:1:1"))?.complete && (await stored("tt1234567:1:2"))?.complete && state.checked >= 4);
     assert.equal(state.warmed, 2);
-    const calls = provider.calls;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(provider.calls, calls, "a finished pass does not search again");
+    assert.equal(await stored("tt1234567:1:3"), undefined, "only the first two are prepared");
+    await server.stores.choices.set("watching", { series: { tt1234567: { season: 1, episode: 2, at: Date.now() } } });
+    await waitFor(async () => (await stored("tt1234567:1:4"))?.complete);
+    assert.ok((await stored("tt1234567:1:3"))?.complete);
+    assert.ok((await stored("tt1234567:1:4"))?.complete);
+    assert.equal(state.warmed, 4);
+  });
+});
+
+test("the subtitle picked before is listed first with 📌, and its team leads the next episode", async () => {
+  const base = fakeProvider("a", 4);
+  const provider = new MultiProvider([{
+    ...base,
+    async search(context) {
+      const episode = context.media.episode;
+      const pad = String(episode).padStart(2, "0");
+      return [0, 1, 2, 3].map((index) => ({
+        provider: "a", fileId: `${episode}-${index}`, downloadRef: `${episode}-${index}`,
+        fileName: `[Team${index}] Show - ${pad} [1080p].srt`, language: "ar",
+        featureDetails: { seasonNumber: 1, episodeNumber: episode }
+      }));
+    }
+  }]);
+  await withServer(provider, { READY_ANSWERS: "false" }, async (url, server) => {
+    const first = await listing(url);
+    const picked = first.subtitles[2];
+    const pickedTeam = picked.label.match(/Team\d/)[0];
+    assert.equal((await fetch(picked.url)).status, 200);
+    await server.flushBackground();
+    const again = await listing(url);
+    assert.match(again.subtitles[0].label, /📌/);
+    assert.ok(again.subtitles[0].label.includes(pickedTeam));
+    const next = await (await fetch(`${url}/subtitles/series/tt1234567:1:8/filename=Show.S01E08.1080p.WEB-DL.mkv.json`)).json();
+    assert.ok(next.subtitles[0].label.includes(pickedTeam), next.subtitles.map((item) => item.label).join("\n"));
+    assert.doesNotMatch(next.subtitles[0].label, /📌/);
   });
 });

@@ -1,6 +1,6 @@
 ﻿# Arabic Elite Subtitles 3.6.0
 
-Stremio subtitle add-on that returns up to 25 verified, human-made Arabic subtitles
+Stremio subtitle add-on that returns up to 30 verified, human-made Arabic subtitles
 from many sources, ranked by how well they match the playing release.
 
 ```
