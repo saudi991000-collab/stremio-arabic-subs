@@ -80,6 +80,11 @@ export function readConfig(env = process.env) {
     // background refresh runs, so a cold or slow provider never empties a list.
     cacheTtlSeconds: int(env.CACHE_TTL_SECONDS, 21600, 60, 604800),
     searchStaleSeconds: int(env.SEARCH_STALE_SECONDS, 604800, 3600, 2592000),
+    // Series whose episode lists are prepared in the background, one episode
+    // at a time while nobody is watching, so the first open is instant.
+    warmSeries: list(env.WARM_SERIES ?? "tt0994314,tt0165581").filter((id) => /^tt\d{5,10}$/.test(id)),
+    warmIntervalSeconds: int(env.WARM_INTERVAL_SECONDS, 90, 30, 3600),
+    warmRefreshDays: int(env.WARM_REFRESH_DAYS, 3, 1, 6),
     verdictTtlSeconds: int(env.VERDICT_TTL_SECONDS, 1209600, 3600, 7776000),
     cacheDirectory: path.resolve(env.CACHE_DIRECTORY || "./data/cache"),
     upstash: env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN

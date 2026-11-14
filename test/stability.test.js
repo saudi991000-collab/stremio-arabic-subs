@@ -275,3 +275,24 @@ test("prepares the next episode in the background and serves filename requests f
     assert.match(response.headers.get("x-listing-status"), /cache=seeded/);
   });
 });
+
+test("warm-up prepares every episode of a listed series once, then sleeps", async () => {
+  const provider = fakeProvider("a", 2);
+  const fetchImpl = async () => new Response(JSON.stringify({ meta: { videos: [
+    { season: 0, episode: 1 }, { season: 1, episode: 1 }, { season: 1, episode: 2 }
+  ] } }), { status: 200 });
+  await withServer(provider, {}, async (_base, server) => {
+    const state = server.startWarmer({ series: ["tt1234567"], intervalMs: 40, fetchImpl });
+    const until = Date.now() + 8000;
+    while (Date.now() < until) {
+      const done = await Promise.all(["tt1234567:1:1", "tt1234567:1:2"].map((id) => server.stores.search.get(`search:v8:series:${id}:::`)));
+      if (done.every((entry) => entry?.complete) && state.checked >= 4) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(state.episodes, 2);
+    assert.equal(state.warmed, 2);
+    const calls = provider.calls;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(provider.calls, calls, "a finished pass does not search again");
+  });
+});

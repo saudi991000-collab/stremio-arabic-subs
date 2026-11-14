@@ -1046,7 +1046,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           version: manifest.version,
           providerConfigured: configuredProviders.length > 0 || Boolean(provider),
           providers: actualProvider.names || ["custom"],
-          persistentCache: remote ? "upstash" : "disk"
+          persistentCache: remote ? "upstash" : "disk",
+          ...(server.warmState ? { warmUp: server.warmState } : {})
         });
       }
       if (url.pathname === "/manifest.json") return json(response, 200, srtOnly ? srtManifest : manifest);
@@ -1258,6 +1259,77 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     retryTimers.add(timer);
   }
 
+  // Background preparation of whole series (WARM_SERIES): every few
+  // minutes, while no listing is being answered and no other background
+  // search runs, the next episode that has no complete list (or an old one)
+  // is searched and verified. A full pass with nothing to do sleeps for hours,
+  // so the shared store is not polled all day.
+  server.startWarmer = ({ series = config.warmSeries, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 6 * 3600000 } = {}) => {
+    if (!series?.length) return null;
+    const episodes = [];
+    let loaded = false;
+    let cursor = 0;
+    let checkedSinceWork = 0;
+    let sleepUntil = 0;
+    const state = { warmed: 0, checked: 0, episodes: 0, last: null };
+    async function loadEpisodes() {
+      for (const id of series) {
+        const response = await fetchImpl(`https://v3-cinemeta.strem.io/meta/series/${id}.json`, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15000) });
+        if (!response.ok) throw new Error(`Cinemeta HTTP ${response.status}`);
+        const videos = (await response.json())?.meta?.videos || [];
+        videos.filter((video) => Number(video.season) > 0 && Number(video.episode) > 0)
+          .sort((a, b) => a.season - b.season || a.episode - b.episode)
+          .forEach((video) => episodes.push(`${id}:${Number(video.season)}:${Number(video.episode)}`));
+      }
+      loaded = true;
+      state.episodes = episodes.length;
+      logger.info("warm-up list loaded", { series: series.length, episodes: episodes.length });
+    }
+    async function tick() {
+      if (Date.now() < sleepUntil || activeListings > 0 || refreshes.size > 0 || validations.size > 0) return;
+      if (!loaded) await loadEpisodes();
+      if (!episodes.length) return;
+      for (let scanned = 0; scanned < 25; scanned += 1) {
+        const videoId = episodes[cursor];
+        cursor = (cursor + 1) % episodes.length;
+        state.checked += 1;
+        const key = searchKey("series", videoId, {});
+        const entry = await searchStore.get(key);
+        const fresh = entry && entry.complete && !identityUnresolved(entry.media) && Date.now() - (entry.updatedAt || 0) < refreshMs;
+        if (fresh) {
+          checkedSinceWork += 1;
+          if (checkedSinceWork >= episodes.length) {
+            checkedSinceWork = 0;
+            sleepUntil = Date.now() + idleMs;
+            logger.info("warm-up pass complete", { episodes: episodes.length });
+            return;
+          }
+          continue;
+        }
+        checkedSinceWork = 0;
+        const media = entry?.media && !identityUnresolved(entry.media) ? entry.media : await alignMediaToFilename(await resolveVideoId("series", videoId), {});
+        if (identityUnresolved(media)) continue;
+        const work = scheduleRefresh(key, { media, extra: { filename: "", videoHash: "" } });
+        if (work) {
+          state.warmed += 1;
+          state.last = videoId;
+          logger.info("warm-up episode", { videoId });
+        }
+        return;
+      }
+    }
+    let running = false;
+    const timer = setInterval(() => {
+      if (running) return;
+      running = true;
+      tick().catch((error) => logger.warn("warm-up failed", { reason: error?.message || String(error) })).finally(() => { running = false; });
+    }, intervalMs);
+    timer.unref?.();
+    server.on("close", () => clearInterval(timer));
+    server.warmState = state;
+    return state;
+  };
+
   server.flushBackground = async () => {
     for (const timer of retryTimers) clearTimeout(timer);
     retryTimers.clear();
@@ -1277,6 +1349,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const config = readConfig();
   if (config.tokenSecretGenerated) logger.warn("URL_TOKEN_SECRET is not set; signed subtitle URLs will change after restart");
   const server = await createAddonServer({ config });
+  server.startWarmer();
   server.listen(config.port, config.host, () => {
     logger.info("Arabic Elite Subtitles started", { version: manifest.version, host: config.host, port: config.port, configure: `${config.publicBaseUrl || `http://127.0.0.1:${config.port}`}/configure` });
   });
