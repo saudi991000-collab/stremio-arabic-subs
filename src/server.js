@@ -25,6 +25,7 @@ import { StremioV3Provider } from "./providers/stremio-v3.js";
 import { WyzieProvider } from "./providers/wyzie.js";
 import { SubKongProvider } from "./providers/subkong.js";
 import { MiraiAnimeProvider } from "./providers/miraianime.js";
+import { useAnimeNameStore } from "./anime-titles.js";
 import { AniKotoProvider } from "./providers/anikoto.js";
 import { TheSubtitleDbProvider } from "./providers/thesubtitledb.js";
 import { MoraProvider } from "./providers/mora.js";
@@ -420,7 +421,7 @@ function searchKey(type, id, extra) {
   const filename = path.basename(String(extra.filename || "")).toLowerCase().slice(0, 240);
   // v4: media identity carries Kitsu romaji/English titles (needed without a
   // filename); v3 entries could hold an abbreviated title.
-  return `search:v5:${type}:${id}:${filename}:${String(extra.videoHash || "").toLowerCase()}:${extra.videoSize || ""}`;
+  return `search:v6:${type}:${id}:${filename}:${String(extra.videoHash || "").toLowerCase()}:${extra.videoSize || ""}`;
 }
 
 export function buildProviders(config) {
@@ -463,6 +464,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   const searchStore = stores?.search || new JsonStore({ directory: config.cacheDirectory, namespace: "search", ttlSeconds: config.searchStaleSeconds, remote });
   const verdictStore = stores?.verdicts || new JsonStore({ directory: config.cacheDirectory, namespace: "verdicts", ttlSeconds: config.verdictTtlSeconds, remote });
   const timingStore = stores?.timing || new JsonStore({ directory: config.cacheDirectory, namespace: "timing", ttlSeconds: config.timingMemoryTtlSeconds, remote });
+  useAnimeNameStore(stores?.anime || new JsonStore({ directory: config.cacheDirectory, namespace: "anime", ttlSeconds: 30 * 24 * 3600, remote }));
   const timingMemory = new TimingMemory(timingStore);
   const companion = new CompanionRegistry();
   const mediaAnalyzer = new LocalMediaAnalyzer({

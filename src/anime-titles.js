@@ -43,15 +43,16 @@ export function pickArmRow(rows, season) {
   return bySeason || (wanted === 1 ? tv[0] : null) || null;
 }
 
+// Throws when ARM cannot be reached (retried later); null = not an anime.
 async function armRow(media, signal) {
   const kitsu = String(media.sourceId || "").match(/^kitsu:(\d+)/i)?.[1];
   if (kitsu) {
-    const row = await getJson(`${ARM_API}/ids?source=kitsu&id=${kitsu}`, { signal, hosts: ["arm.haglund.dev"] }).catch(() => null);
+    const row = await getJson(`${ARM_API}/ids?source=kitsu&id=${kitsu}`, { signal, hosts: ["arm.haglund.dev"], timeoutMs: 6000 });
     if (row) return row;
   }
   if (!media.imdbId) return null;
   const imdb = `tt${String(media.imdbId).replace(/^tt/, "").padStart(7, "0")}`;
-  const rows = await getJson(`${ARM_API}/imdb?id=${imdb}`, { signal, hosts: ["arm.haglund.dev"] }).catch(() => null);
+  const rows = await getJson(`${ARM_API}/imdb?id=${imdb}`, { signal, hosts: ["arm.haglund.dev"], timeoutMs: 6000 });
   return pickArmRow(rows, media.type === "series" ? media.season : 1);
 }
 
@@ -61,17 +62,50 @@ async function anilistNames(id, signal) {
     signal,
     hosts: ["graphql.anilist.co"],
     method: "POST",
-    body: JSON.stringify({ query, variables: { id: Number(id) } })
+    body: JSON.stringify({ query, variables: { id: Number(id) } }),
+    timeoutMs: 6000
   }).catch(() => null);
   const media = payload?.data?.Media;
   return media ? [media.title?.romaji, media.title?.english, ...(media.synonyms || [])] : [];
 }
 
 async function kitsuNames(id, signal) {
-  const payload = await getJson(`${KITSU_API}/anime/${Number(id)}?fields[anime]=titles,canonicalTitle,abbreviatedTitles`, { signal, hosts: ["kitsu.app"] }).catch(() => null);
+  const payload = await getJson(`${KITSU_API}/anime/${Number(id)}?fields[anime]=titles,canonicalTitle,abbreviatedTitles`, { signal, hosts: ["kitsu.app"], timeoutMs: 6000 }).catch(() => null);
   const attributes = payload?.data?.attributes;
   if (!attributes) return [];
   return [attributes.titles?.en_jp, attributes.canonicalTitle, attributes.titles?.en, ...(attributes.abbreviatedTitles || [])];
+}
+
+let store = null;
+// Optional shared store (Upstash): names survive restarts of the free server.
+export function useAnimeNameStore(value) {
+  store = value || null;
+}
+
+async function lookup(media, key) {
+  const saved = store ? await store.get(`anime-names:v1:${key}`).catch(() => undefined) : undefined;
+  if (saved?.names) return saved;
+  // Not tied to the viewer's request: a slow first lookup still finishes and
+  // is ready for the next request.
+  const signal = AbortSignal.timeout(20000);
+  const row = await armRow(media, signal);
+  if (!row) return { names: [], final: true };
+  const [anilist, kitsu] = await Promise.all([
+    row.anilist ? anilistNames(row.anilist, signal) : [],
+    row.kitsu ? kitsuNames(row.kitsu, signal) : []
+  ]);
+  const seen = new Set();
+  // AniList romaji first, then Kitsu's romaji, then English and the rest.
+  const ordered = [anilist[0], kitsu[0], kitsu[1], ...anilist.slice(1), ...kitsu.slice(2)];
+  const names = ordered.map(latin).filter((name) => {
+    const id = name.toLowerCase();
+    if (!name || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0, 6);
+  const value = { anilistId: row.anilist || null, kitsuId: row.kitsu || null, names, final: true };
+  if (names.length) await store?.set(`anime-names:v1:${key}`, value).catch(() => null);
+  return value;
 }
 
 // Returns { anilistId, kitsuId, names: [romaji first, then English, others] }.
@@ -80,29 +114,19 @@ export async function animeNames(media = {}, { signal } = {}) {
   if (key.startsWith(":")) return { names: [] };
   const hit = cache.get(key);
   if (hit && hit.until > Date.now()) return hit.value;
-  if (inflight.has(key)) return inflight.get(key);
-  const work = (async () => {
-    const row = await armRow(media, signal);
-    if (!row) return { names: [] };
-    let names = row.anilist ? await anilistNames(row.anilist, signal) : [];
-    if (!names.filter(latin).length && row.kitsu) names = await kitsuNames(row.kitsu, signal);
-    const seen = new Set();
-    const clean = names.map(latin).filter((name) => {
-      const id = name.toLowerCase();
-      if (!name || seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
-    return { anilistId: row.anilist || null, kitsuId: row.kitsu || null, names: clean.slice(0, 6) };
-  })().catch(() => ({ names: [] }));
-  inflight.set(key, work);
-  try {
-    const value = await work;
-    // Failures are retried sooner than successes.
-    cache.set(key, { value, until: Date.now() + (value.names.length ? TTL_MS : 10 * 60 * 1000) });
-    if (cache.size > 2000) cache.delete(cache.keys().next().value);
-    return value;
-  } finally {
-    inflight.delete(key);
+  let work = inflight.get(key);
+  if (!work) {
+    work = lookup(media, key).catch(() => ({ names: [], final: false })).then((value) => {
+      // Only a definite answer is kept; a timeout is tried again next time.
+      if (value.names.length || value.final) {
+        cache.set(key, { value, until: Date.now() + (value.names.length ? TTL_MS : 30 * 60 * 1000) });
+        if (cache.size > 2000) cache.delete(cache.keys().next().value);
+      }
+      return value;
+    }).finally(() => inflight.delete(key));
+    inflight.set(key, work);
   }
+  if (!signal) return work;
+  if (signal.aborted) return { names: [] };
+  return Promise.race([work, new Promise((resolve) => signal.addEventListener("abort", () => resolve({ names: [] }), { once: true }))]);
 }

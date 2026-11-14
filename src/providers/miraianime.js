@@ -85,7 +85,10 @@ export class MiraiAnimeProvider {
     if (context.media.type !== "series" || !Number.isInteger(Number(context.media.episode))) return [];
     const title = titleFor(context);
     // The site uses Japanese (romaji) names; look them up for this season.
-    const anime = await (this.config.animeNames || animeNames)(context.media, { signal }).catch(() => ({ names: [] }));
+    // Not raced against the request: if it is slow, the result arrives late
+    // and is merged, instead of an "empty" answer being cached.
+    const anime = await (this.config.animeNames || animeNames)(context.media).catch(() => ({ names: [] }));
+    signal?.throwIfAborted?.();
     const names = anime.names || [];
     let matches = [];
     if (names.length) {
