@@ -42,7 +42,7 @@ test("returns the exact hash result first in top-ten mode", async () => {
     const response = await fetch(`${base}/subtitles/movie/tt1234567/videoHash=abc&filename=Movie.2025.BluRay.mkv.json`);
     const value = await response.json();
     assert.equal(value.subtitles.length, 2);
-    assert.match(value.subtitles[0].label, /^1 💪👍 \| Custom • SRT • Movie\.2025\.BluRay/);
+    assert.match(value.subtitles[0].label, /^1 💪👍 🎯 \| Custom • SRT • Movie\.2025\.BluRay/);
     assert.equal(value.subtitles[0].lang, "ara");
   });
 });

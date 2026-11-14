@@ -215,12 +215,34 @@ test("discovers MiraiAnime ZIP packs for the requested anime episode", async () 
     if (calls === 1) return new Response(JSON.stringify([{ title: "Code Geass", url: "https://miraianime.net/anime/code-geass/" }]), { status: 200 });
     return new Response('<a class="download-file" href="https://miraianime.net/wp-content/uploads/code-geass.zip">Download</a>', { status: 200 });
   }, async () => {
-    const provider = new MiraiAnimeProvider();
+    const provider = new MiraiAnimeProvider({ animeNames: async () => ({ names: [] }) });
     const results = await provider.search(context);
     assert.equal(results.length, 1);
     assert.equal(results[0].provider, "miraianime");
     assert.equal(results[0].featureDetails.episodeNumber, 7);
     assert.match(results[0].fileName, /S01E07/);
+    assert.match(results[0].downloadRef, /#s=1&e=7$/);
+  });
+});
+
+test("searches MiraiAnime by the romaji name and skips other shows of the franchise", async () => {
+  const searched = [];
+  await withMockFetch(async (url) => {
+    if (String(url).includes("/wp-json/")) {
+      searched.push(new URL(url).searchParams.get("search"));
+      return new Response(JSON.stringify([
+        { title: "Code Geass: Dakkan no Rozé", url: "https://miraianime.net/anime/code-geass-dakkan-no-roze/" },
+        { title: "Code Geass: Hangyaku no Lelouch", url: "https://miraianime.net/anime/code-geass-hangyaku-no-lelouch/" }
+      ]), { status: 200 });
+    }
+    assert.match(String(url), /subtitle\/code-geass-hangyaku-no-lelouch\//);
+    return new Response('<a href="https://miraianime.net/wp-content/uploads/cg.zip">Download</a>', { status: 200 });
+  }, async () => {
+    const provider = new MiraiAnimeProvider({ animeNames: async () => ({ names: ["Code Geass: Hangyaku no Lelouch", "Code Geass: Lelouch of the Rebellion"] }) });
+    const results = await provider.search(context);
+    assert.equal(searched[0], "Code Geass: Hangyaku no Lelouch");
+    assert.equal(results.length, 1);
+    assert.match(results[0].fileName, /Hangyaku/);
   });
 });
 

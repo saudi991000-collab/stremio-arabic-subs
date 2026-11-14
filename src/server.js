@@ -183,6 +183,19 @@ export function badgesFor(candidate) {
   return { matched, team, styled };
 }
 
+// 🎯 = timing checked against this exact video (its hash, its own audio or
+// embedded track) or confirmed by two independent references; ⚠️ = the
+// references disagree, so the timing may be off.
+const VIDEO_REFERENCE_KINDS = new Set(["exact-hash", "embedded", "embedded-sample", "audio-whisper"]);
+export function timingCheck(candidate = {}) {
+  const reasons = candidate.reasons || [];
+  if (reasons.includes("timing-conflict") || reasons.includes("timing-mismatch")) return "conflict";
+  if (reasons.includes("exact-hash")) return "verified";
+  const score = Number(candidate.timingScore) || 0;
+  if (score >= 0.75 && (VIDEO_REFERENCE_KINDS.has(candidate.timingReferenceKind) || reasons.includes("timing-consensus"))) return "verified";
+  return "";
+}
+
 export function detailedResultLabel(candidate, index) {
   const release = compactReleaseName(candidate);
   const parsed = parseReleaseName(candidate.fileName || candidate.release || "");
@@ -192,7 +205,9 @@ export function detailedResultLabel(candidate, index) {
     matched ? resultLabel(candidate) : "",
     team ? "🇸🇦" : "",
     styled ? "🎨" : "",
+    timingCheck(candidate) === "verified" ? "🎯" : "",
     candidate.timingCorrected ? "⏱" : "",
+    timingCheck(candidate) === "conflict" ? "⚠️" : "",
     candidate.userRating < 0 ? "👎" : ""
   ].filter(Boolean).join(" ");
   const details = [
@@ -235,7 +250,10 @@ export function sortForDisplay(candidates) {
     .sort((a, b) =>
       // The viewer's own 👍 / 👎 from the /timing page come first.
       (b.candidate.userRating || 0) - (a.candidate.userRating || 0) ||
+      // ⚠️ timing goes below the rest; 🎯 breaks ties.
+      Number(timingCheck(a.candidate) === "conflict") - Number(timingCheck(b.candidate) === "conflict") ||
       b.badges.count - a.badges.count ||
+      Number(timingCheck(b.candidate) === "verified") - Number(timingCheck(a.candidate) === "verified") ||
       Number(b.badges.matched) - Number(a.badges.matched) ||
       Number(b.badges.arabicTeam) - Number(a.badges.arabicTeam) ||
       Number(b.badges.styled) - Number(a.badges.styled) ||
@@ -402,7 +420,7 @@ function searchKey(type, id, extra) {
   const filename = path.basename(String(extra.filename || "")).toLowerCase().slice(0, 240);
   // v4: media identity carries Kitsu romaji/English titles (needed without a
   // filename); v3 entries could hold an abbreviated title.
-  return `search:v4:${type}:${id}:${filename}:${String(extra.videoHash || "").toLowerCase()}:${extra.videoSize || ""}`;
+  return `search:v5:${type}:${id}:${filename}:${String(extra.videoHash || "").toLowerCase()}:${extra.videoSize || ""}`;
 }
 
 export function buildProviders(config) {

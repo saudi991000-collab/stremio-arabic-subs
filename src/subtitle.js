@@ -27,7 +27,7 @@ function findEocd(buffer) {
   return -1;
 }
 
-function archiveEntryScore(fileName, selector = {}) {
+export function archiveEntryScore(fileName, selector = {}) {
   const episode = Number(selector.episode);
   if (!Number.isInteger(episode)) return 0;
   const season = Number(selector.season);
