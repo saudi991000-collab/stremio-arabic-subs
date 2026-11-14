@@ -90,12 +90,19 @@ export class MiraiAnimeProvider {
     const anime = await (this.config.animeNames || animeNames)(context.media).catch(() => ({ names: [] }));
     signal?.throwIfAborted?.();
     const names = anime.names || [];
+    if (!names.length && anime.final === false) throw new Error("Anime names lookup failed");
     let matches = [];
     if (names.length) {
       const wanted = names.map(plainTitle);
       const queries = [...new Set([names[0], names[0].split(/[:\-–]/)[0].trim(), ...names.slice(1, 3)])].filter((query) => query.length >= 3).slice(0, 3);
+      let failures = 0;
+      let lastError;
       for (const query of queries) {
-        const rows = await this.findRows(query, signal).catch(() => []);
+        const rows = await this.findRows(query, signal).catch((error) => {
+          failures += 1;
+          lastError = error;
+          return [];
+        });
         // Same season only: "Code Geass" must not pick "Code Geass: Dakkan no Rozé".
         const exact = rows.filter((row) => wanted.includes(plainTitle(decodeHtml(row.title || ""))));
         const close = exact.length ? exact : rows.filter((row) => names.some((name) => sameShow(name, decodeHtml(row.title || ""))));
@@ -104,6 +111,7 @@ export class MiraiAnimeProvider {
           break;
         }
       }
+      if (!matches.length && failures === queries.length && lastError) throw lastError;
     } else if (title) {
       const rows = await this.findRows(title, signal);
       const filtered = rows.filter((row) => {

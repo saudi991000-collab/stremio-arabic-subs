@@ -27,7 +27,10 @@ async function getJson(url, { signal, hosts, method, body, timeoutMs = 4000 } = 
     maxBytes: 2 * 1024 * 1024,
     okStatuses: [400, 403, 404, 429]
   });
-  return response.status === 200 ? response.json() : null;
+  if (response.status === 200) return response.json();
+  if (response.status === 404) return null;
+  // 403/429: busy or blocked right now; not an answer.
+  throw new Error(`Anime titles HTTP ${response.status}`);
 }
 
 // Latin-script names only: the sites are searched with them.
@@ -90,6 +93,7 @@ async function lookup(media, key) {
   const signal = AbortSignal.timeout(20000);
   const row = await armRow(media, signal);
   if (!row) return { names: [], final: true };
+  // Lookups that failed for a reason other than "not found" are retried.
   const [anilist, kitsu] = await Promise.all([
     row.anilist ? anilistNames(row.anilist, signal) : [],
     row.kitsu ? kitsuNames(row.kitsu, signal) : []
@@ -103,7 +107,7 @@ async function lookup(media, key) {
     seen.add(id);
     return true;
   }).slice(0, 6);
-  const value = { anilistId: row.anilist || null, kitsuId: row.kitsu || null, names, final: true };
+  const value = { anilistId: row.anilist || null, kitsuId: row.kitsu || null, names, final: names.length > 0 };
   if (names.length) await store?.set(`anime-names:v1:${key}`, value).catch(() => null);
   return value;
 }
