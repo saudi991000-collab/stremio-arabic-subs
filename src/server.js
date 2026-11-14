@@ -582,26 +582,31 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   // While an episode is watched, search the next one in the background so its
   // list is ready (and instant) when the player asks for it.
   const prefetched = new Map();
+  // The next two episodes are searched (and then verified) in the
+  // background, spaced out so the small instance is not flooded. A list that
+  // is already complete is left alone; a partial one is completed.
   function prefetchNextEpisode(type, videoId) {
     const match = String(videoId).match(/^(.*:)(\d{1,5})$/);
     if (!match) return;
-    const nextId = `${match[1]}${Number(match[2]) + 1}`;
-    if (prefetched.has(nextId)) return;
-    prefetched.set(nextId, Date.now());
-    if (prefetched.size > 2000) prefetched.delete(prefetched.keys().next().value);
-    const timer = setTimeout(() => {
-      retryTimers.delete(timer);
-      track(runInBackground(async () => {
-        const nextKey = searchKey(type, nextId, {});
-        const existing = await searchStore.get(nextKey);
-        if (existing && !identityUnresolved(existing.media)) return;
-        const nextMedia = await alignMediaToFilename(await resolveVideoId(type, nextId), {});
-        if (identityUnresolved(nextMedia)) return;
-        scheduleRefresh(nextKey, { media: nextMedia, extra: { filename: "", videoHash: "" } });
-      }));
-    }, 3000);
-    timer.unref?.();
-    retryTimers.add(timer);
+    [1, 2].forEach((step, index) => {
+      const nextId = `${match[1]}${Number(match[2]) + step}`;
+      if (prefetched.has(nextId)) return;
+      prefetched.set(nextId, Date.now());
+      if (prefetched.size > 2000) prefetched.delete(prefetched.keys().next().value);
+      const timer = setTimeout(() => {
+        retryTimers.delete(timer);
+        track(runInBackground(async () => {
+          const nextKey = searchKey(type, nextId, {});
+          const existing = await searchStore.get(nextKey);
+          if (existing && existing.complete && !identityUnresolved(existing.media)) return;
+          const nextMedia = await alignMediaToFilename(await resolveVideoId(type, nextId), {});
+          if (identityUnresolved(nextMedia)) return;
+          scheduleRefresh(nextKey, { media: nextMedia, extra: { filename: "", videoHash: "" } });
+        }));
+      }, index === 0 ? 3000 : 45000);
+      timer.unref?.();
+      retryTimers.add(timer);
+    });
   }
 
   // Load large provider indexes (archive listings, show lists) at start-up
@@ -812,7 +817,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     // Per-source counts and season-pack progress (no names or ids), so a short
     // list can be explained from the response header alone.
     const sources = Object.entries(entry.providers || {})
-      .map(([id, item]) => `${id}:${item.status}:${item.count ?? 0}${item.reason ? `:${String(item.reason).replace(/[^\w .-]/g, " ").slice(0, 40)}` : ""}`)
+      .map(([id, item]) => `${id}:${item.status}:${item.count ?? 0}${item.reason ? `:${String(item.reason).replace(/^.*?(?:failed|error)\s*(?:with)?\s*/i, "").replace(/[^\w .-]/g, " ").slice(0, 40)}` : ""}`)
       .join(",");
     const packs = rankedAll.filter(isSeasonPack);
     const packIds = new Set(packs.map((candidate) => `${candidate.provider}:${candidate.fileId}`));
