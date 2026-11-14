@@ -67,6 +67,8 @@ export function readConfig(env = process.env) {
     timingFixKey: String(env.TIMING_FIX_KEY || "").trim(),
     // Extra English/Arabic references compared before a correction is trusted.
     timingReferences: int(env.TIMING_REFERENCES, 3, 1, 4),
+    // Right-to-left marks, advert/credit removal, short/overlapping lines.
+    polishSubtitles: bool(env.POLISH_SUBTITLES, true),
     ffprobePath: env.STREMIO_FFPROBE_PATH || (localPrograms ? path.join(localPrograms, "ffprobe.exe") : "ffprobe"),
     ffmpegPath: env.STREMIO_FFMPEG_PATH || (localPrograms ? path.join(localPrograms, "ffmpeg.exe") : "ffmpeg"),
     whisperPath: path.resolve(env.WHISPER_PATH || "tools/whisper/bin/Release/whisper-cli.exe"),

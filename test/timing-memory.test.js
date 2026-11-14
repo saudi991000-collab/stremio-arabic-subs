@@ -199,7 +199,7 @@ test("a timing fix from the /timing page reaches every later download", async ()
     assert.ok(Math.abs(after[0].start - (before[0].start - 2)) < 0.01, `${before[0].start} -> ${after[0].start}`);
     const page = await fetch(`${base}/timing`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /تصحيح توقيت الترجمة/);
+    assert.match(await page.text(), /تقييم وتصحيح الترجمة/);
     const bad = await fetch(`${base}/timing/fix`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Timing-Key": "secret-key" },

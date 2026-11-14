@@ -150,6 +150,30 @@ export class TimingMemory {
     });
   }
 
+  // 👍 / 👎 from the /timing page, per episode (every release of it).
+  async rate(key, id, value) {
+    if (!/^timing:v1:[^|]+\|[hf]:/.test(String(key)) || !/^[0-9a-f]{16}$/.test(String(id))) throw new Error("Unknown subtitle");
+    const episode = String(key).slice("timing:v1:".length).split("|")[0];
+    const rating = Math.sign(Number(value) || 0);
+    await this.#update(`ratings:v1:${episode}`, (record) => {
+      record.items = record.items || {};
+      if (rating) record.items[id] = { rating, at: Date.now() };
+      else delete record.items[id];
+      return record;
+    });
+    await this.#update(RECENT_KEY, (record) => ({
+      list: (record.list || []).map((entry) => entry.key === key && entry.item === id ? { ...entry, rating } : entry)
+    }));
+    return { rating };
+  }
+
+  async ratings(context) {
+    const episode = episodeKey(context?.media);
+    if (!episode) return {};
+    const record = await this.store.get(`ratings:v1:${episode}`).catch(() => undefined);
+    return Object.fromEntries(Object.entries(record?.items || {}).map(([id, entry]) => [id, entry.rating]));
+  }
+
   async recent() {
     const record = await this.store.get(RECENT_KEY).catch(() => undefined);
     return record?.list || [];

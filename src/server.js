@@ -31,10 +31,12 @@ import { MoraProvider } from "./providers/mora.js";
 import { Subf2mProvider } from "./providers/subf2m.js";
 import { YifySubtitlesProvider } from "./providers/yifysubtitles.js";
 import { TvSubtitlesProvider } from "./providers/tvsubtitles.js";
+import { MovieSubtitlesProvider } from "./providers/moviesubtitles.js";
 import { MultiProvider } from "./providers/multi.js";
 import { deepAnalyzeCandidates, isTransientError, normalizedSubtitleCacheKey, retryableRejection, verdictKey } from "./deep-analyzer.js";
 import { isIdentityTransform, retimeSubtitle } from "./timing.js";
-import { TimingMemory } from "./timing-memory.js";
+import { TimingMemory, itemId } from "./timing-memory.js";
+import { polishSubtitle } from "./polish.js";
 import {
   CompanionRegistry,
   discoverWindowsStremioHlsSession,
@@ -118,6 +120,7 @@ function extensionOf(candidate) {
 export const PROVIDER_LABELS = {
   opensubtitles: "OpenSubtitles",
   "opensubtitles-org": "OpenSubtitles.org",
+  moviesubtitles: "MovieSubtitles",
   subdl: "SubDL",
   subsource: "SubSource",
   arabicsubs: "ArabicSubs",
@@ -184,7 +187,14 @@ export function detailedResultLabel(candidate, index) {
   const release = compactReleaseName(candidate);
   const parsed = parseReleaseName(candidate.fileName || candidate.release || "");
   const { matched, team, styled } = badgesFor(candidate);
-  const badges = [matched ? resultLabel(candidate) : "", team ? "🇸🇦" : "", styled ? "🎨" : ""].filter(Boolean).join(" ");
+  const badges = [
+    candidate.userRating > 0 ? "⭐" : "",
+    matched ? resultLabel(candidate) : "",
+    team ? "🇸🇦" : "",
+    styled ? "🎨" : "",
+    candidate.timingCorrected ? "⏱" : "",
+    candidate.userRating < 0 ? "👎" : ""
+  ].filter(Boolean).join(" ");
   const details = [
     team,
     PLATFORM_LABELS[parsed.platform],
@@ -223,6 +233,8 @@ export function sortForDisplay(candidates) {
   return candidates
     .map((candidate) => ({ candidate, badges: displayBadgeProfile(candidate) }))
     .sort((a, b) =>
+      // The viewer's own 👍 / 👎 from the /timing page come first.
+      (b.candidate.userRating || 0) - (a.candidate.userRating || 0) ||
       b.badges.count - a.badges.count ||
       Number(b.badges.matched) - Number(a.badges.matched) ||
       Number(b.badges.arabicTeam) - Number(a.badges.arabicTeam) ||
@@ -410,6 +422,7 @@ export function buildProviders(config) {
     ...(config.anikoto?.enabled !== false ? [new AniKotoProvider(config.anikoto)] : []),
     ...(config.yify?.enabled !== false ? [new YifySubtitlesProvider()] : []),
     ...(config.tvsubtitles?.enabled !== false ? [new TvSubtitlesProvider()] : []),
+    new MovieSubtitlesProvider(),
     new StremioV3Provider()
   ];
   return providers.filter((provider) => !disabled.has(provider.id));
@@ -756,6 +769,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     // colours, italics/bold and top/bottom position (<font color>, {anN}),
     // which Android TV and iPad players render with correct timing.
     if (srtOnly) eligible = eligible.map((candidate) => ({ ...candidate, actualFormat: "srt" }));
+    const ratings = await within(timingMemory.ratings(context), 800, {}).catch(() => ({}));
+    eligible = eligible.map((candidate) => {
+      const rating = ratings[itemId({ provider: candidate.provider || "opensubtitles", ref: candidate.downloadRef ?? candidate.fileId })];
+      const timingCorrected = Boolean(timingTransform(candidate, config.syncMinConfidence));
+      return rating || timingCorrected ? { ...candidate, userRating: rating || 0, timingCorrected } : candidate;
+    });
     const displayRanked = sortForDisplay(eligible);
     const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
     const selected = sortForDisplay(diverse);
@@ -985,6 +1004,11 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         if (url.pathname === "/timing/recent" && request.method === "GET") {
           return json(response, 200, { recent: await timingMemory.recent() }, { "Access-Control-Allow-Origin": undefined, "Cache-Control": "no-store" });
         }
+        if (url.pathname === "/timing/rate" && request.method === "POST") {
+          const body = await readJsonBody(request, 2048);
+          const result = await timingMemory.rate(String(body.key || ""), String(body.item || ""), Number(body.rating));
+          return json(response, 200, { ok: true, ...result }, { "Access-Control-Allow-Origin": undefined, "Cache-Control": "no-store" });
+        }
         if (url.pathname === "/timing/fix" && request.method === "POST") {
           const body = await readJsonBody(request, 2048);
           const seconds = Number(body.seconds);
@@ -1155,6 +1179,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
                 offset: transform.segments ? undefined : Number(transform.offset).toFixed(3),
                 reference: transform.reference
               });
+            }
+            if (config.polishSubtitles) {
+              normalizedBuffer = Buffer.from(polishSubtitle(normalizedBuffer.toString("utf8"), extension), "utf8");
             }
             const contentType = extension === "vtt" ? "text/vtt" : extension === "ass" || extension === "ssa" ? "text/x-ssa" : "application/x-subrip";
             response.writeHead(200, { "Content-Type": `${contentType}; charset=utf-8`, "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300", ...SECURITY_HEADERS });

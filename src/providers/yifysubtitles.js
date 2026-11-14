@@ -5,8 +5,13 @@ import { normalizeName } from "../media.js";
 // community-made Arabic files. One listing page per movie IMDb id; the ZIP is
 // fetched only when the subtitle is validated or played. The site requires the
 // normal Referer header its own download button sends; no login or CAPTCHA.
-const HOSTS = ["yifysubtitles.ch"];
-const BASE = "https://yifysubtitles.ch";
+// yts-subs.com serves the same index and slugs; it is used when the main
+// site blocks the add-on's server (HTTP 403 from cloud hosts).
+const HOSTS = ["yifysubtitles.ch", "yts-subs.com", "subtitles.yts-subs.com"];
+const MIRRORS = [
+  { base: "https://yifysubtitles.ch", zip: (slug) => `https://yifysubtitles.ch/subtitle/${slug}.zip` },
+  { base: "https://yts-subs.com", zip: (slug) => `https://subtitles.yts-subs.com/subtitles/${slug}.zip` }
+];
 const limiter = limiterFor("yifysubtitles", { minIntervalMs: 400, concurrency: 2 });
 
 function clean(value) {
@@ -57,16 +62,27 @@ export class YifySubtitlesProvider {
   async search(context, _maxPages, { signal } = {}) {
     if (context.media.type !== "movie" || !context.media.imdbId) return [];
     const imdb = `tt${String(context.media.imdbId).padStart(7, "0")}`;
-    const response = await safeFetch(`${BASE}/movie-imdb/${imdb}`, {
-      allowedHosts: HOSTS,
-      headers: { Accept: "text/html" },
-      signal,
-      timeoutMs: 7000,
-      limiter,
-      label: "YIFY search",
-      maxBytes: 3 * 1024 * 1024,
-      okStatuses: [404]
-    });
+    let response;
+    let lastError;
+    for (const mirror of MIRRORS) {
+      try {
+        response = await safeFetch(`${mirror.base}/movie-imdb/${imdb}`, {
+          allowedHosts: HOSTS,
+          headers: { Accept: "text/html" },
+          signal,
+          timeoutMs: 7000,
+          limiter,
+          label: "YIFY search",
+          maxBytes: 3 * 1024 * 1024,
+          okStatuses: [404]
+        });
+        break;
+      } catch (error) {
+        lastError = error;
+        if (signal?.aborted) throw error;
+      }
+    }
+    if (!response) throw lastError;
     if (response.status === 404) return [];
     const wanted = new Set(normalizeName(context.extra.filename || "").split(" ").filter((token) => token.length >= 2));
     const overlap = (name) => normalizeName(name).split(" ").filter((token) => wanted.has(token)).length;
@@ -100,15 +116,24 @@ export class YifySubtitlesProvider {
   async download(ref, { signal } = {}) {
     const slug = String(ref || "");
     if (!/^[a-z0-9-]{3,200}$/i.test(slug)) throw new Error("Invalid YIFY subtitle reference");
-    const response = await safeFetch(`${BASE}/subtitle/${slug}.zip`, {
-      allowedHosts: HOSTS,
-      headers: { Referer: `${BASE}/subtitles/${slug}`, Accept: "application/zip,*/*" },
-      signal,
-      timeoutMs: 12000,
-      limiter,
-      label: "YIFY download",
-      maxBytes: 10 * 1024 * 1024
-    });
-    return { buffer: response.buffer, fileName: `${slug}.zip` };
+    let lastError;
+    for (const mirror of MIRRORS) {
+      try {
+        const response = await safeFetch(mirror.zip(slug), {
+          allowedHosts: HOSTS,
+          headers: { Referer: `${mirror.base}/subtitles/${slug}`, Accept: "application/zip,*/*" },
+          signal,
+          timeoutMs: 12000,
+          limiter,
+          label: "YIFY download",
+          maxBytes: 10 * 1024 * 1024
+        });
+        return { buffer: response.buffer, fileName: `${slug}.zip` };
+      } catch (error) {
+        lastError = error;
+        if (signal?.aborted) throw error;
+      }
+    }
+    throw lastError;
   }
 }

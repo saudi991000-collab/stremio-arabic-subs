@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>تصحيح التوقيت</title>
+<title>تقييم وتصحيح الترجمة</title>
 <style>
   :root { --bg:#0d0b18; --card:#171328; --line:#2c2546; --accent:#7c5cff; --text:#fff; --muted:#bdb6d6; --ok:#3ccf91; --bad:#ff6b81; }
   * { box-sizing: border-box; }
@@ -34,7 +34,7 @@
 </head>
 <body>
 <main>
-  <h1>تصحيح توقيت الترجمة</h1>
+  <h1>تقييم وتصحيح الترجمة</h1>
   <p class="lead">إذا كانت الترجمة متأخرة أو متقدمة عن الكلام، صحّحها هنا مرة واحدة، وتنحفظ لكل أجهزتك (Mi Box، الآيباد، الكمبيوتر).</p>
 
   <section id="keyBox">
@@ -53,7 +53,17 @@
   </section>
 
   <section>
-    <h2>٢. وش المشكلة؟</h2>
+    <h2>٢. قيّم الترجمة</h2>
+    <div class="choice">
+      <button type="button" id="like" disabled>👍 ممتازة، خلها أول القائمة</button>
+      <button type="button" id="dislike" disabled>👎 سيئة، نزّلها تحت</button>
+    </div>
+    <button type="button" id="unrate" class="ghost" disabled>ألغِ التقييم</button>
+    <p class="hint">التقييم يطبّق على هذي الحلقة في كل أجهزتك من المرة الجاية اللي تفتح فيها قائمة الترجمات.</p>
+  </section>
+
+  <section>
+    <h2>٣. التوقيت: وش المشكلة؟</h2>
     <div class="choice">
       <button type="button" data-dir="-1" aria-pressed="true">الترجمة متأخرة عن الكلام</button>
       <button type="button" data-dir="1" aria-pressed="false">الترجمة قبل الكلام</button>
@@ -75,6 +85,9 @@
   var status = document.getElementById("status");
   var apply = document.getElementById("apply");
   var reset = document.getElementById("reset");
+  var like = document.getElementById("like");
+  var dislike = document.getElementById("dislike");
+  var unrate = document.getElementById("unrate");
   var selected = null;
   var direction = -1;
   try { keyInput.value = localStorage.getItem("timingKey") || ""; } catch (e) {}
@@ -108,8 +121,9 @@
       b.type = "button";
       b.setAttribute("aria-pressed", "false");
       var title = document.createElement("strong");
+      var star = item.rating > 0 ? "👍 " : item.rating < 0 ? "👎 " : "";
       var ep = item.season != null && item.episode != null ? " — م" + item.season + " ح" + item.episode : "";
-      title.textContent = (item.title || "بدون عنوان") + ep;
+      title.textContent = star + (item.title || "بدون عنوان") + ep;
       var meta = document.createElement("span");
       meta.className = "meta";
       meta.textContent = (item.label || "") + " · " + ago(item.at);
@@ -121,6 +135,9 @@
         selected = item;
         apply.disabled = false;
         reset.disabled = false;
+        like.disabled = false;
+        dislike.disabled = false;
+        unrate.disabled = false;
         say("", true);
       });
       li.appendChild(b);
@@ -151,6 +168,17 @@
       return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || "تعذّر الحفظ."); return data; });
     }).then(function () { say(done, true); }).catch(function (e) { say(e.message, false); });
   }
+
+  function rate(value, done) {
+    if (!selected) return;
+    fetch("timing/rate", { method: "POST", headers: headers(), body: JSON.stringify({ key: selected.key, item: selected.item, rating: value }) })
+      .then(function (r) { return r.json().then(function (data) { if (!r.ok) throw new Error(data.error || "تعذّر الحفظ."); }); })
+      .then(function () { selected.rating = value; say(done, true); })
+      .catch(function (e) { say(e.message, false); });
+  }
+  like.addEventListener("click", function () { rate(1, "انحفظ 👍. بتطلع أول القائمة."); });
+  dislike.addEventListener("click", function () { rate(-1, "انحفظ 👎. بتنزل آخر القائمة."); });
+  unrate.addEventListener("click", function () { rate(0, "انلغى التقييم."); });
 
   apply.addEventListener("click", function () {
     var seconds = Number(document.getElementById("seconds").value);
