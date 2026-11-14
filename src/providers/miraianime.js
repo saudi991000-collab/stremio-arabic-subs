@@ -33,6 +33,23 @@ function plainTitle(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+// Team (or release group) and video source from a MiraiAnime zip name.
+export function miraiZipInfo(url) {
+  let name = "";
+  try {
+    name = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+  } catch {
+    name = String(url || "");
+  }
+  name = name.replace(/\.zip$/i, "");
+  const first = name.split(/[-_ ]/)[0] || "";
+  const group = /^[A-Za-z][A-Za-z0-9&]{1,24}$/.test(first) ? first : "";
+  const source = /(?:^|[-_ \d])(?:BD|Blu-?Ray)(?:$|[-_ ])/i.test(name) ? "BD"
+    : /(?:^|[-_ \d])Web(?:-?DL|Rip)?(?:$|[-_ ])/i.test(name) ? "WEB"
+      : /(?:^|[-_ \d])TV(?:$|[-_ ])/i.test(name) ? "TV" : "";
+  return { group, source };
+}
+
 // "Shingeki no Kyojin 3" = "Shingeki no Kyojin Season 3", but
 // "One Piece" != "One Piece: Heroines": only season words may differ.
 const SEASON_WORDS = new Set(["season", "s", "st", "nd", "rd", "th", "part", "cour", "tv", "the"]);
@@ -171,7 +188,11 @@ export class MiraiAnimeProvider {
     const episode = Number(context.media.episode);
     return pages.flat().slice(0, 12).map(({ row, url }, index) => {
       const show = decodeHtml(row.title || title).replace(/\s+/g, ".");
-      const fileName = `${show}.S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}.Mirai.${index + 1}.ass`;
+      // The zip name says who made it and for which video:
+      // "SPEEDTOON-Code-Geass-...-S01-0125-TV.zip" → [SPEEDTOON] … [TV].
+      const { group, source } = miraiZipInfo(url);
+      const tag = `${group ? `[${group}] ` : ""}`;
+      const fileName = `${tag}${show}.S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}${source ? ` [${source}]` : ""}${group ? "" : `.Mirai.${index + 1}`}.ass`;
       const ref = `${url.split("#")[0]}#s=${season}&e=${episode}`;
       return {
         provider: "miraianime",

@@ -327,3 +327,22 @@ test("the subtitle picked before is listed first with 📌, and its team leads t
     assert.doesNotMatch(next.subtitles[0].label, /📌/);
   });
 });
+
+test("short lists are searched again sooner, and unaired episodes are not prepared", async () => {
+  const { freshForMs } = await import("../src/server.js");
+  const config = { cacheTtlSeconds: 21600 };
+  assert.equal(freshForMs({ candidates: [1, 2] }, config), 3600000);
+  assert.equal(freshForMs({ candidates: [1, 2, 3, 4, 5, 6] }, config), 21600000);
+  const future = new Date(Date.now() + 7 * 86400000).toISOString();
+  const fetchImpl = async () => new Response(JSON.stringify({ meta: { videos: [
+    { season: 1, episode: 1, released: "2020-01-01T00:00:00.000Z" }, { season: 1, episode: 2, released: future }
+  ] } }), { status: 200 });
+  await withServer(fakeProvider("a", 1), {}, async (_base, server) => {
+    const state = server.startWarmer({ series: ["tt1234567"], perSeries: 5, intervalMs: 30, idleMs: 60000, fetchImpl });
+    const until = Date.now() + 5000;
+    while (Date.now() < until && state.warmed < 1) await new Promise((resolve) => setTimeout(resolve, 30));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(state.episodes, 1);
+    assert.equal(state.last, "tt1234567:1:1");
+  });
+});

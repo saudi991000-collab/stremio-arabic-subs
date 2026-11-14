@@ -212,8 +212,10 @@ export function detailedResultLabel(candidate, index) {
     timingCheck(candidate) === "conflict" ? "⚠️" : "",
     candidate.userRating < 0 ? "👎" : ""
   ].filter(Boolean).join(" ");
+  // MiraiAnime hosts many teams' files: show the team named in the zip.
+  const shownTeam = (candidate.provider === "miraianime" && /^\[([^\]]{2,30})\]/.exec(candidate.fileName || "")?.[1]) || team;
   const details = [
-    team,
+    shownTeam,
     PLATFORM_LABELS[parsed.platform],
     PROVIDER_LABELS[candidate.provider] || candidate.provider || "Custom",
     extensionOf(candidate).toUpperCase(),
@@ -423,6 +425,13 @@ function serializableTransform(transform) {
       offset: Number(segment.offset.toFixed(3))
     }))
   };
+}
+
+// A list with few subtitles (often a new episode whose Arabic translation
+// is not out yet) is searched again after an hour instead of six.
+export function freshForMs(entry, config) {
+  const full = config.cacheTtlSeconds * 1000;
+  return (entry?.candidates?.length || 0) < 5 ? Math.min(full, 3600000) : full;
 }
 
 function searchKey(type, id, extra) {
@@ -782,7 +791,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     }
     mark("media");
     const context = { media, extra, seedKey };
-    const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < config.cacheTtlSeconds * 1000 ? "fresh" : "stale";
+    const cacheState = !entry ? "miss" : seeded ? "seeded" : entry.complete && Date.now() - entry.updatedAt < freshForMs(entry, config) ? "fresh" : "stale";
     if (!entry) {
       // First request for this video: finding candidates matters more
       // than verifying them now (verification continues in the background
@@ -1361,8 +1370,9 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   // only while no listing is being answered and no other background search
   // runs. A full pass with nothing to do sleeps until something new is
   // watched (or an hour), so the shared store is not polled all day.
-  server.startWarmer = ({ series = config.warmSeries, perSeries = config.warmEpisodes, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 3600000 } = {}) => {
+  server.startWarmer = ({ series = config.warmSeries, perSeries = config.warmEpisodes, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 3600000, recentRefreshMs = 3 * 3600000 } = {}) => {
     const episodeLists = new Map();
+    const recent = new Set();
     let cursor = 0;
     let checkedSinceWork = 0;
     let sleepUntil = 0;
@@ -1373,10 +1383,17 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       if (known && Date.now() - known.at < 12 * 3600000) return known.list;
       const response = await fetchImpl(`https://v3-cinemeta.strem.io/meta/series/${id}.json`, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15000) });
       if (!response.ok) throw new Error(`Cinemeta HTTP ${response.status}`);
-      const list = ((await response.json())?.meta?.videos || [])
+      const videos = ((await response.json())?.meta?.videos || [])
         .filter((video) => Number(video.season) > 0 && Number(video.episode) > 0)
-        .sort((a, b) => a.season - b.season || a.episode - b.episode)
-        .map((video) => `${id}:${Number(video.season)}:${Number(video.episode)}`);
+        // Episodes not aired yet have nothing to find.
+        .filter((video) => !(Date.parse(video.released) > Date.now()))
+        .sort((a, b) => a.season - b.season || a.episode - b.episode);
+      const list = videos.map((video) => `${id}:${Number(video.season)}:${Number(video.episode)}`);
+      // Aired in the last 14 days: Arabic fansubs often appear a day or two
+      // later, so these are searched again every few hours.
+      videos.forEach((video, index) => {
+        if (Date.now() - Date.parse(video.released) < 14 * 86400000) recent.add(list[index]);
+      });
       episodeLists.set(id, { at: Date.now(), list });
       return list;
     }
@@ -1408,7 +1425,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         state.checked += 1;
         const key = searchKey("series", videoId, {});
         const entry = await searchStore.get(key);
-        const fresh = entry && entry.complete && !identityUnresolved(entry.media) && Date.now() - (entry.updatedAt || 0) < refreshMs;
+        const fresh = entry && entry.complete && !identityUnresolved(entry.media) && Date.now() - (entry.updatedAt || 0) < (recent.has(videoId) ? Math.min(refreshMs, recentRefreshMs) : refreshMs);
         if (fresh) {
           checkedSinceWork += 1;
           if (checkedSinceWork >= episodes.length) {
