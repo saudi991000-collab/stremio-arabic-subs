@@ -77,3 +77,10 @@ test("quality: a long untranslated stretch is marked, a complete file is not", a
   const holed = assessSubtitle(build([...every(5, 500, 6), ...every(1100, 1400, 6)]));
   assert.ok(holed.reasons.includes("untranslated-gap"), holed.reasons.join(","));
 });
+
+test("archive entries with the number glued to the name are matched", async () => {
+  const { archiveEntryScore } = await import("../src/subtitle.js");
+  assert.ok(archiveEntryScore("[SPEEDTOON] Code Geass S01 [01~25] [TV]/code-geass01.srt", { season: 1, episode: 1 }) > 0);
+  assert.ok(archiveEntryScore("[SPEEDTOON] Code Geass S01 [01~25] [TV]/code-geass01.srt", { season: 1, episode: 10 }) <= 0);
+  assert.equal(archiveEntryScore("Show.x264.srt", { season: 1, episode: 264 }), 0);
+});

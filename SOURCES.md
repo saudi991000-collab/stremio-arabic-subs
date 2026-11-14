@@ -20,7 +20,7 @@ S01E01, Code Geass S01E01).
 | Wyzie | key | ✅ verified with the owner's key | 32 / 9 / 7 results, downloads verified. |
 | SubDL | key | ✅ **fixed**, verified | The old request sent `hi=1`, which SubDL treats as "hearing-impaired only" (1 result). Without it: 38 / 180 / 228 results. |
 | TVsubtitles (`tvsubtitles`) | none | ✅ **new**, verified (TV only) | Arabic track on many shows (e.g. House of the Dragon, every S01 episode). No Arabic for the three audit samples. |
-| ArabicSubs | key | ❌ key rejected | Server answers `invalid_api_key` ("مفتاح API غير صالح أو ملغى"). A new key is needed. |
+| ArabicSubs | key | ❌ not used | API became paid (Nov 2026); owner chose not to pay. Provider stays off without a key. |
 
 Stremio add-on catalogue review (api.strem.io and stremio-addons.net, 140+ subtitle add-ons):
 - Machine/AI translators (Auto Subtitle Translate, SubTranslate, MultiSub, AnySubs, Subtito, DualSubs, AIO PRO…) — excluded by design.

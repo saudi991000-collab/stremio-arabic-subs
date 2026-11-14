@@ -46,6 +46,9 @@ export function archiveEntryScore(fileName, selector = {}) {
   const base = fileName.replace(/^.*[\\/]/, "");
   if (new RegExp(`\\b(?:episode|ep|e)[ ._-]*0*${escapedEpisode}\\b`, "i").test(base)) return 100;
   if (new RegExp(`(?:^|[\\s._\\-[\\(])0*${escapedEpisode}(?=$|[\\s._\\-\\]\\)])`, "i").test(base)) return 70;
+  // Number glued to the show name at the end: "code-geass01.srt".
+  const glued = base.match(/[a-z](\d{1,3})(?:v\d)?\.[a-z0-9]{2,4}$/i);
+  if (glued && !/(?:[xh]|mp)\d+(?:v\d)?\.[a-z0-9]{2,4}$/i.test(base) && Number(glued[1]) === episode) return 40;
   return 0;
 }
 
