@@ -9,7 +9,8 @@ import { logger } from "./logger.js";
 import { manifest } from "./manifest.js";
 import { parseExtra, parseReleaseName } from "./media.js";
 import { alignMediaLocally, alignMediaToFilename, identityUnresolved, resolveVideoId } from "./id-resolver.js";
-import { arabicFansubTeam, rankCandidates, releaseMatched, resultLabel, stableKey } from "./ranker.js";
+import { arabicFansubTeam, madeForThisVideo, rankCandidates, releaseFit, releaseMatched, resultLabel, stableKey } from "./ranker.js";
+export { madeForThisVideo, releaseFit };
 import { signSubtitleToken, verifySubtitleToken } from "./token.js";
 import { convertToFormat, detectTextFormat, normalizeSubtitle } from "./subtitle.js";
 import { Cache } from "./cache.js";
@@ -195,30 +196,6 @@ export function timingCheck(candidate = {}) {
   const score = Number(candidate.timingScore) || 0;
   if (score >= 0.75 && (VIDEO_REFERENCE_KINDS.has(candidate.timingReferenceKind) || reasons.includes("timing-consensus"))) return "verified";
   return "";
-}
-
-// How closely a subtitle's release matches the video being played, from the
-// file name Stremio sends: the same file (hash) or release name, the same
-// frame rate, platform, source and release group. Higher = listed earlier.
-const RELEASE_FIT = {
-  "exact-hash": 1000,
-  "exact-release": 300,
-  "same-fps": 120,
-  "same-platform": 100,
-  "same-source": 90,
-  "same-group": 80,
-  "compatible-source": 75
-};
-export function releaseFit(candidate = {}) {
-  return (candidate.reasons || []).reduce((sum, reason) => sum + (RELEASE_FIT[reason] || 0), 0);
-}
-// ✅ only when the subtitle was made for this very release (same file, same
-// name, same group or frame rate, or same platform and source), not merely
-// for "a BluRay".
-export function madeForThisVideo(candidate = {}) {
-  const reasons = candidate.reasons || [];
-  if (["exact-hash", "exact-release", "same-group", "same-fps"].some((reason) => reasons.includes(reason))) return true;
-  return reasons.includes("same-platform") && (reasons.includes("same-source") || reasons.includes("compatible-source"));
 }
 
 const SOURCE_LABELS = {

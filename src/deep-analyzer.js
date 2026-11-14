@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { normalizeSubtitle } from "./subtitle.js";
 import { alignTimelines, compareSpeechActivity, compareTimelines, inspectStyling, mapTime, parseTimeline } from "./timing.js";
 import { assessSubtitle, extractCues } from "./quality.js";
+import { releaseFit } from "./ranker.js";
 
 export { compareSpeechActivity, compareTimelines };
 
@@ -471,13 +472,17 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
     if (results[index] === null) continue;
     analyzed.push(results[index] || { ...selected[index], deepAnalyzed: false, validationPending: true });
   }
-  // Identical files offered by several providers collapse into one result.
-  const seenContent = new Set();
-  const unique = sortDeepCandidates(analyzed).filter((candidate) => {
-    if (!candidate.contentHash) return true;
-    if (seenContent.has(candidate.contentHash)) return false;
-    seenContent.add(candidate.contentHash);
-    return true;
-  });
+  // Identical files offered by several providers (same words, same length)
+  // collapse into one result: the copy whose release name is closest to the
+  // video is kept ("[DeadFish] ... [BD]" for a DeadFish video), so the best
+  // match is never hidden behind a copy uploaded under another name.
+  const sameKey = (candidate) => `${candidate.contentHash}:${Math.round((candidate.subtitleDurationSeconds || 0) / 3)}`;
+  const keep = new Map();
+  for (const candidate of sortDeepCandidates(analyzed)) {
+    if (!candidate.contentHash) continue;
+    const current = keep.get(sameKey(candidate));
+    if (!current || releaseFit(candidate) > releaseFit(current)) keep.set(sameKey(candidate), candidate);
+  }
+  const unique = sortDeepCandidates(analyzed).filter((candidate) => !candidate.contentHash || keep.get(sameKey(candidate)) === candidate);
   return sortDeepCandidates([...unique, ...candidates.filter((candidate) => !selectedSet.has(candidate))]);
 }

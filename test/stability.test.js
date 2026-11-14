@@ -373,3 +373,21 @@ test("short lists are searched again sooner, and unaired episodes are not prepar
     assert.equal(state.last, "tt1234567:1:1");
   });
 });
+
+test("of identical files, the copy named like the video is the one listed", async () => {
+  const names = ["[3ASQ] Show.S01E07.1080p.BluRay.srt", "Show.S01E07.1080p.WEB-DL.DDP5.1.H.264-NTb.srt"];
+  const provider = new MultiProvider([{
+    ...fakeProvider("mix", 2),
+    async search() {
+      return names.map((fileName, index) => ({ provider: "mix", fileId: index, downloadRef: `copy-${index}`, fileName, language: "ar", featureDetails: { seasonNumber: 1, episodeNumber: 7 } }));
+    },
+    async download() {
+      return { buffer: Buffer.from(arabicSrt(40, { lines: LINES("same") })), fileName: "same.srt" };
+    }
+  }]);
+  const result = await withServer(provider, {}, async (base) =>
+    (await fetch(`${base}/subtitles/series/tt1234567:1:7/filename=Show.S01E07.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv.json`)).json());
+  const labels = result.subtitles.map((item) => item.label);
+  assert.equal(labels.length, 1, labels.join(" / "));
+  assert.match(labels[0], /NTb/);
+});

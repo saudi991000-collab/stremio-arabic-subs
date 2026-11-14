@@ -334,3 +334,27 @@ export function releaseMatched(candidate) {
 export function resultLabel(candidate) {
   return releaseMatched(candidate) ? "💪👍" : "";
 }
+
+// How closely a subtitle's release matches the video being played, from the
+// file name Stremio sends: the same file (hash) or release name, the same
+// frame rate, platform, source and release group. Higher = listed earlier.
+const RELEASE_FIT = {
+  "exact-hash": 1000,
+  "exact-release": 300,
+  "same-fps": 120,
+  "same-platform": 100,
+  "same-source": 90,
+  "same-group": 80,
+  "compatible-source": 75
+};
+export function releaseFit(candidate = {}) {
+  return (candidate.reasons || []).reduce((sum, reason) => sum + (RELEASE_FIT[reason] || 0), 0);
+}
+// ✅ only when the subtitle was made for this very release (same file, same
+// name, same group or frame rate, or same platform and source), not merely
+// for "a BluRay".
+export function madeForThisVideo(candidate = {}) {
+  const reasons = candidate.reasons || [];
+  if (["exact-hash", "exact-release", "same-group", "same-fps"].some((reason) => reasons.includes(reason))) return true;
+  return reasons.includes("same-platform") && (reasons.includes("same-source") || reasons.includes("compatible-source"));
+}
