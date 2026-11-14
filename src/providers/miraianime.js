@@ -16,6 +16,19 @@ function decodeHtml(value) {
     .replaceAll("&amp;", "&");
 }
 
+// Search results and season pages change rarely; keep them for 6 hours so
+// every episode of a season does not ask the site again.
+const memo = new Map();
+const MEMO_MS = 6 * 60 * 60 * 1000;
+function recall(key) {
+  const hit = memo.get(key);
+  return hit && hit.until > Date.now() ? hit.value : undefined;
+}
+function remember(key, value) {
+  memo.set(key, { value, until: Date.now() + MEMO_MS });
+  if (memo.size > 1000) memo.delete(memo.keys().next().value);
+}
+
 function plainTitle(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -67,6 +80,8 @@ export class MiraiAnimeProvider {
   }
 
   async findRows(query, signal) {
+    const known = recall(`search:${query.toLowerCase()}`);
+    if (known) return known;
     const params = new URLSearchParams({ search: query, per_page: "20" });
     const response = await safeFetch(`${this.config.baseUrl}/wp-json/wp/v2/search?${params}`, {
       allowedHosts: HOSTS,
@@ -78,7 +93,10 @@ export class MiraiAnimeProvider {
       maxBytes: 2 * 1024 * 1024
     });
     const rows = response.json();
-    return (Array.isArray(rows) ? rows : []).filter((row) => row?.url && safeMiraiUrl(row.url) && /\/anime\//.test(row.url));
+    const found = (Array.isArray(rows) ? rows : []).filter((row) => row?.url && safeMiraiUrl(row.url) && /\/anime\//.test(row.url))
+      .map((row) => ({ title: row.title, url: row.url }));
+    remember(`search:${query.toLowerCase()}`, found);
+    return found;
   }
 
   async search(context, _maxPages, { signal } = {}) {
@@ -132,6 +150,9 @@ export class MiraiAnimeProvider {
     if (!matches.length) return [];
     const pages = await Promise.all(matches.map(async (row) => {
       const subtitlePage = String(row.url).replace("/anime/", "/subtitle/");
+      // One page serves every episode of the season.
+      const known = recall(subtitlePage);
+      if (known) return known.map((url) => ({ row, url }));
       const page = await safeFetch(subtitlePage, {
         allowedHosts: HOSTS,
         headers: { Accept: "text/html" },
@@ -141,9 +162,10 @@ export class MiraiAnimeProvider {
         label: "MiraiAnime page",
         maxBytes: 4 * 1024 * 1024,
         okStatuses: [404]
-      }).catch(() => null);
-      if (!page || page.status !== 200) return [];
-      return archiveLinks(page.text(), subtitlePage).map((url) => ({ row, url }));
+      });
+      const links = page.status === 200 ? archiveLinks(page.text(), subtitlePage) : [];
+      remember(subtitlePage, links);
+      return links.map((url) => ({ row, url }));
     }));
     const season = Number(context.media.season) || 1;
     const episode = Number(context.media.episode);
