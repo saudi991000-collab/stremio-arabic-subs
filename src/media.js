@@ -147,7 +147,9 @@ function parseReleaseNameUncached(filename) {
   const source = SOURCE_ALIASES.find(([, aliases]) => aliases.some((pattern) => pattern.test(normalized)))?.[0];
   const edition = EDITIONS.find((item) => normalized.includes(item.replace("'", "")));
   const platform = PLATFORM_PATTERNS.find(([, patterns]) => patterns.some((pattern) => pattern.test(normalized)))?.[0];
-  const suffixGroup = filename.match(/-([A-Za-z0-9]+)(?:\.[A-Za-z0-9]{2,4})?$/)?.[1];
+  // "...-NTb.mkv" names the release group; "...WEB-DL.mkv" does not.
+  const suffixToken = filename.match(/-([A-Za-z0-9]+)(?:\.[A-Za-z0-9]{2,4})?$/)?.[1];
+  const suffixGroup = suffixToken && !/^(?:dl|rip|web|hd|sd|tv|bd|x26[45]|h26[45]|hevc|avc|aac|ac3|dts|\d+p?)$/i.test(suffixToken) ? suffixToken : undefined;
   const prefixGroup = filename.match(/^\s*\[([^\]]+)\]/)?.[1];
   // Absolute anime numbering ("[Group] Title - 1085 [1080p]") without a season.
   const absoluteMatch = !seasonEpisode && filename.match(/(?:\s[-–—]\s*|\s(?:ep?|episode)\s*)0*(\d{1,4})(?:v\d+)?(?=\s*(?:\[|\(|$|\.[a-z0-9]{2,4}$|\s))/i);

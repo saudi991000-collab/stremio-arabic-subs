@@ -197,31 +197,63 @@ export function timingCheck(candidate = {}) {
   return "";
 }
 
+// How closely a subtitle's release matches the video being played, from the
+// file name Stremio sends: the same file (hash) or release name, the same
+// frame rate, platform, source and release group. Higher = listed earlier.
+const RELEASE_FIT = {
+  "exact-hash": 1000,
+  "exact-release": 300,
+  "same-fps": 120,
+  "same-platform": 100,
+  "same-source": 90,
+  "same-group": 80,
+  "compatible-source": 75
+};
+export function releaseFit(candidate = {}) {
+  return (candidate.reasons || []).reduce((sum, reason) => sum + (RELEASE_FIT[reason] || 0), 0);
+}
+// ✅ only when the subtitle was made for this very release (same file, same
+// name, same group or frame rate, or same platform and source), not merely
+// for "a BluRay".
+export function madeForThisVideo(candidate = {}) {
+  const reasons = candidate.reasons || [];
+  if (["exact-hash", "exact-release", "same-group", "same-fps"].some((reason) => reasons.includes(reason))) return true;
+  return reasons.includes("same-platform") && (reasons.includes("same-source") || reasons.includes("compatible-source"));
+}
+
+const SOURCE_LABELS = {
+  bluray: "BD", remux: "BD", "web-dl": "WEB", webrip: "WEB", web: "WEB", hdtv: "TV", dvdrip: "DVD", dvd: "DVD"
+};
+
+// Short label for TV screens: number, marks, who made it, and which video
+// it was made for. "3 ✅ Memories • BD 🎨"
+// ✅ made for this version · 📌 picked before · ⭐ rated · 🎯 timing checked
+// · ⏱ timing corrected · ⚠️ timing doubtful · 🎨 styled · 👎 rated down
 export function detailedResultLabel(candidate, index) {
-  const release = compactReleaseName(candidate);
   const parsed = parseReleaseName(candidate.fileName || candidate.release || "");
-  const { matched, team, styled } = badgesFor(candidate);
-  const badges = [
+  const { team, styled } = badgesFor(candidate);
+  const marks = [
     candidate.chosen === 2 ? "📌" : "",
     candidate.userRating > 0 ? "⭐" : "",
-    matched ? resultLabel(candidate) : "",
-    team ? "🇸🇦" : "",
-    styled ? "🎨" : "",
+    madeForThisVideo(candidate) ? "✅" : "",
     timingCheck(candidate) === "verified" ? "🎯" : "",
     candidate.timingCorrected ? "⏱" : "",
     timingCheck(candidate) === "conflict" ? "⚠️" : "",
     candidate.userRating < 0 ? "👎" : ""
-  ].filter(Boolean).join(" ");
+  ].filter(Boolean).join("");
   // MiraiAnime hosts many teams' files: show the team named in the zip.
   const shownTeam = (candidate.provider === "miraianime" && /^\[([^\]]{2,30})\]/.exec(candidate.fileName || "")?.[1]) || team;
-  const details = [
-    shownTeam,
-    PLATFORM_LABELS[parsed.platform],
-    PROVIDER_LABELS[candidate.provider] || candidate.provider || "Custom",
-    extensionOf(candidate).toUpperCase(),
-    release
-  ].filter(Boolean);
-  return `${index + 1}${badges ? ` ${badges}` : ""} | ${details.join(" • ")}`;
+  const who = shownTeam || PROVIDER_LABELS[candidate.provider] || candidate.provider || "Custom";
+  const platform = PLATFORM_LABELS[parsed.platform];
+  // Release group as written in the name ("-NTb", "[DeadFish]"), unless it
+  // repeats the team or platform already shown.
+  const groupName = parsed.group && /^[a-z0-9]{2,15}$/i.test(parsed.group) &&
+    parsed.group !== String(shownTeam || "").toLowerCase() && parsed.group !== String(platform || "").toLowerCase()
+    ? (String(candidate.fileName || candidate.release || "").match(new RegExp(`(?:^|[-\\[ .])(${parsed.group})(?=$|[\\]. ])`, "i"))?.[1] || parsed.group)
+    : "";
+  const video = [platform || SOURCE_LABELS[parsed.source], parsed.resolution, groupName].filter(Boolean).join(" ");
+  const details = [who, video].filter(Boolean).join(" • ");
+  return `${index + 1}${marks ? ` ${marks}` : ""} ${details}${styled ? " 🎨" : ""}`;
 }
 
 // URL-safe version of the label for the subtitle link's final path segment.
@@ -254,10 +286,15 @@ export function sortForDisplay(candidates) {
     .sort((a, b) =>
       // The viewer's own 👍 / 👎 from the /timing page come first.
       (b.candidate.userRating || 0) - (a.candidate.userRating || 0) ||
-      // What the viewer picked before (this episode, then this series' team).
-      (b.candidate.chosen || 0) - (a.candidate.chosen || 0) ||
-      // ⚠️ timing goes below the rest; 🎯 breaks ties.
+      // The file picked for this episode before.
+      Number(b.candidate.chosen === 2) - Number(a.candidate.chosen === 2) ||
+      // ⚠️ timing goes below the rest.
       Number(timingCheck(a.candidate) === "conflict") - Number(timingCheck(b.candidate) === "conflict") ||
+      // Closest to the video's own release first (hash, release name, fps,
+      // platform, source, group).
+      releaseFit(b.candidate) - releaseFit(a.candidate) ||
+      // Then the team picked last in this series, then quality.
+      Number(b.candidate.chosen === 1) - Number(a.candidate.chosen === 1) ||
       b.badges.count - a.badges.count ||
       Number(timingCheck(b.candidate) === "verified") - Number(timingCheck(a.candidate) === "verified") ||
       Number(b.badges.matched) - Number(a.badges.matched) ||
@@ -322,6 +359,20 @@ export function dropDuplicatesAndOutliers(candidates, videoDurationSeconds) {
     if (!duplicate) kept.push(candidate);
   }
   return kept;
+}
+
+// The same subtitle uploaded to several sources (or twice under different
+// names) is listed once: same words and the same length means the same file.
+// A copy re-timed for another release keeps its own entry.
+export function dropSameFiles(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    if (!candidate.contentHash || !candidate.subtitleDurationSeconds) return true;
+    const key = `${candidate.contentHash}:${Math.round(candidate.subtitleDurationSeconds / 3)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeReleaseKey(candidate) {
@@ -896,7 +947,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       const chosen = choices.episode && choices.episode === id ? 2 : choices.style && choices.style === subtitleStyle(candidate) ? 1 : 0;
       return rating || timingCorrected || chosen ? { ...candidate, userRating: rating || 0, timingCorrected, chosen } : candidate;
     });
-    const displayRanked = sortForDisplay(eligible);
+    const displayRanked = dropSameFiles(sortForDisplay(eligible));
     const diverse = config.resultMode === "best" ? displayRanked.slice(0, 1) : selectDiverseCandidates(displayRanked, config.maxResults);
     const selected = sortForDisplay(diverse);
     const subtitles = selected.map((candidate, index) => {

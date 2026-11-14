@@ -138,7 +138,7 @@ test("returns up to 30 valid results and never pads the list", async () => {
   assert.equal(few.subtitles.length, 3);
 });
 
-test("orders emoji badges 💪👍 → 🇸🇦 → 🎨 and sorts by badge count", async () => {
+test("short labels: ✅ only for the same release, team, source, 🎨 for styled", async () => {
   const names = ["Other.Show.Pack.S01.srt", "Show.S01E07.1080p.WEB-DL.srt", "[3ASQ] Show.S01E07.1080p.WEB-DL.srt", "[3ASQ] Show.S01E07.1080p.WEB-DL.styled.ass"];
   const provider = new MultiProvider([{
     ...fakeProvider("mix", 4, { names: (index) => names[index] }),
@@ -149,10 +149,37 @@ test("orders emoji badges 💪👍 → 🇸🇦 → 🎨 and sorts by badge coun
   const result = await withServer(provider, {}, async (base) => listing(base));
   const labels = result.subtitles.map((item) => item.label);
   assert.equal(labels.length, 3, "the season pack is not listed");
-  assert.match(labels[0], /^1 💪👍 🇸🇦 🎨 \| 3ASQ • mix • ASS • \[3ASQ\] Show\.S01E07/);
-  assert.match(labels[1], /^2 💪👍 🇸🇦 \| 3ASQ • mix • SRT/);
-  assert.match(labels[2], /^3 💪👍 \| mix • SRT/);
-  for (const label of labels) assert.doesNotMatch(label, /🇸🇦 💪👍|🎨 🇸🇦|%/);
+  // Same name as the video first, then the Arabic team, styled first.
+  assert.match(labels[0], /^1 ✅ mix • WEB 1080p$/);
+  assert.match(labels[1], /^2 3ASQ • WEB 1080p 🎨$/);
+  assert.match(labels[2], /^3 3ASQ • WEB 1080p$/);
+  for (const label of labels) assert.doesNotMatch(label, /%|\|/);
+});
+
+test("the subtitle closest to the video's release is listed first, then quality", async () => {
+  const names = ["[3ASQ] Show.S01E07.1080p.BluRay.x264.ass", "Show.S01E07.1080p.WEB-DL.DDP5.1.H.264-NTb.srt", "Show.S01E07.720p.HDTV.x264-LOL.srt"];
+  const provider = new MultiProvider([{
+    ...fakeProvider("mix", 3),
+    async search() {
+      return names.map((fileName, index) => ({ provider: "mix", fileId: index, downloadRef: index === 0 ? "styled" : `plain-${index}`, fileName, language: "ar", featureDetails: { seasonNumber: 1, episodeNumber: 7 } }));
+    }
+  }]);
+  const result = await withServer(provider, {}, async (base) =>
+    (await fetch(`${base}/subtitles/series/tt1234567:1:7/filename=Show.S01E07.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv.json`)).json());
+  const labels = result.subtitles.map((item) => item.label);
+  assert.match(labels[0], /^1 ✅ mix • WEB 1080p NTb$/, labels.join(" / "));
+  assert.match(labels[1], /3ASQ/, "a known Arabic team comes next");
+});
+
+test("the same file from two sources is listed once", async () => {
+  const { dropSameFiles } = await import("../src/server.js");
+  const kept = dropSameFiles([
+    { fileId: 1, contentHash: "aa", subtitleDurationSeconds: 1400 },
+    { fileId: 2, contentHash: "aa", subtitleDurationSeconds: 1401 },
+    { fileId: 3, contentHash: "aa", subtitleDurationSeconds: 1460 },
+    { fileId: 4 }
+  ]);
+  assert.deepEqual(kept.map((item) => item.fileId), [1, 3, 4]);
 });
 
 test("collapses mirrored files across providers and drops length outliers", () => {

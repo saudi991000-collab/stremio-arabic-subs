@@ -44,9 +44,11 @@ export function miraiZipInfo(url) {
   name = name.replace(/\.zip$/i, "");
   const first = name.split(/[-_ ]/)[0] || "";
   const group = /^[A-Za-z][A-Za-z0-9&]{1,24}$/.test(first) ? first : "";
+  // Written the way release names spell them, so the ranker can compare
+  // them with the video's own source.
   const source = /(?:^|[-_ \d])(?:BD|Blu-?Ray)(?:$|[-_ ])/i.test(name) ? "BD"
-    : /(?:^|[-_ \d])Web(?:-?DL|Rip)?(?:$|[-_ ])/i.test(name) ? "WEB"
-      : /(?:^|[-_ \d])TV(?:$|[-_ ])/i.test(name) ? "TV" : "";
+    : /(?:^|[-_ \d])Web(?:-?DL|Rip)?(?:$|[-_ ])/i.test(name) ? "WEB-DL"
+      : /(?:^|[-_ \d])TV(?:$|[-_ ])/i.test(name) ? "HDTV" : "";
   return { group, source };
 }
 

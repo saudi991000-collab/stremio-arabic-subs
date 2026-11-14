@@ -22,10 +22,17 @@ optional timing alignment (multi-window, RANSAC, frame-rate scales, safe piecewi
 → deterministic ranking and labels → signed subtitle URLs with fallbacks.
 
 ## Labels
-`1 💪👍 🇸🇦 🎨 | Team • Platform • Source • FORMAT • Release`
-- 💪👍 release name matches the playing video (hash, exact or strong match, or same title + episode).
-- 🇸🇦 recognised Arabic team (`config/arabic-teams.json`, editable without code changes).
-- 🎨 styling/colours/positioning/karaoke confirmed by inspecting the file.
+`3 ✅ Memories • BD 720p DeadFish 🎨` — number, marks, who made it (Arabic team from
+`config/arabic-teams.json`, else the source site), and the video it was made for
+(platform or source, resolution, release group).
+- ✅ made for this very release: same file hash, same release name, same group or
+  frame rate, or same platform and source.
+- 📌 picked for this episode before · ⭐/👎 rated · 🎯 timing checked · ⏱ timing
+  corrected · ⚠️ references disagree on timing · 🎨 styling confirmed in the file.
+
+Order: picked before, then closest to the video's release (hash, name, fps, platform,
+source, group), then the team picked last in this series, Arabic teams, styling and
+quality. The same file from several sources (same words, same length) is listed once.
 
 Original ASS/SSA files are served unchanged except for timing. Stremio clients render
 advanced ASS effects differently; VLC or mpv render them most faithfully.
