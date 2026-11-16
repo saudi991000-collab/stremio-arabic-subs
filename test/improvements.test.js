@@ -228,3 +228,11 @@ test("dropDuplicatesAndOutliers drops severely truncated cue-count outliers", ()
   const kept = dropDuplicatesAndOutliers(candidates);
   assert.deepEqual(kept.map((c) => c.fileId), ["1", "2", "3", "4"]);
 });
+
+import { markLine } from "../src/polish.js";
+
+test("markLine anchors trailing weak punctuation (., !, ...) with RLM so it stays on the left", () => {
+  assert.equal(markLine("إن هذا أفضل بكثير."), "\u200Fإن هذا أفضل بكثير.\u200F");
+  assert.equal(markLine("لبقية السناجب!"), "\u200Fلبقية السناجب!\u200F");
+  assert.equal(markLine("<i>انتظر...</i>"), "<i>\u200Fانتظر...\u200F</i>");
+});

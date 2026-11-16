@@ -84,13 +84,18 @@ export function wrapLongLines(lines, maxChars = 48) {
   return [raw.slice(0, best).trimEnd(), raw.slice(best + 1).trimStart()];
 }
 
+const TRAILING_WEAK_PUNCT = /([.!?…,;:)"'»\]]+)(\s*(?:\{[^}]*\}|<[^>]+>)*)$/;
+
 export function markLine(line) {
   const value = String(line);
   if (!ARABIC.test(value)) return value;
   const lead = value.match(/^(?:\s*(?:\{[^}]*\}|<[^>]+>))*/)?.[0] || "";
-  const rest = value.slice(lead.length);
-  if (DIRECTION_MARKS.test(rest)) return value;
-  return `${lead}${RLM}${rest}`;
+  let rest = value.slice(lead.length);
+  if (!DIRECTION_MARKS.test(rest)) rest = `${RLM}${rest}`;
+  if (TRAILING_WEAK_PUNCT.test(rest) && !rest.replace(/(?:\s*(?:\{[^}]*\}|<[^>]+>))*$/, "").endsWith(RLM)) {
+    rest = rest.replace(TRAILING_WEAK_PUNCT, `$1${RLM}$2`);
+  }
+  return `${lead}${rest}`;
 }
 
 function clock(seconds, separator) {
