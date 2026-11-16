@@ -1,0 +1,20 @@
+name: Keep add-on awake
+
+# Render's free plan sleeps after 15 idle minutes; the first subtitle request
+# after that waited for a cold start and lost every prepared list. One light
+# /health request every 10 minutes keeps it awake (one free service fits in
+# Render's 750 free hours a month).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        run: curl -fsS -m 90 --retry 2 --retry-delay 10 https://arabic-elite-subtitles.onrender.com/health > /dev/null
