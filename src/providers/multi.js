@@ -49,7 +49,7 @@ export class MultiProvider {
    * timeout; their results are delivered through `onLate` as a separate
    * snapshot instead of mutating the array that was already returned.
    */
-  async searchSnapshot(context, maxPages, timeoutMs = 0, { onLate, providerTimeoutMs = this.providerTimeoutMs } = {}) {
+  async searchSnapshot(context, maxPages, timeoutMs = 0, { onLate, providerTimeoutMs = this.providerTimeoutMs, earlyMinCandidates = 0, earlyAfterMs = 2500 } = {}) {
     const started = Date.now();
     const providers = {};
     const candidates = [];
@@ -92,6 +92,7 @@ export class MultiProvider {
       if (!responded) {
         providers[provider.id] = status;
         candidates.push(...found);
+        maybeEarly();
       } else {
         late.providers[provider.id] = status;
         late.candidates.push(...found);
@@ -104,14 +105,31 @@ export class MultiProvider {
       }
     });
 
+    let earlyResolve;
+    const earlyPromise = earlyMinCandidates > 0 && timeoutMs > earlyAfterMs
+      ? new Promise((resolve) => { earlyResolve = resolve; })
+      : null;
+    const maybeEarly = () => {
+      if (earlyResolve && !responded && candidates.length >= earlyMinCandidates && Date.now() - started >= earlyAfterMs) {
+        earlyResolve();
+      }
+    };
+    let earlyCheckTimer;
+    if (earlyPromise) {
+      earlyCheckTimer = setTimeout(maybeEarly, earlyAfterMs);
+      earlyCheckTimer.unref?.();
+    }
     const all = Promise.allSettled(runs);
     if (timeoutMs > 0) {
       let deadline;
-      await Promise.race([all, new Promise((resolve) => { deadline = setTimeout(resolve, timeoutMs); })]);
+      const racers = [all, new Promise((resolve) => { deadline = setTimeout(resolve, timeoutMs); })];
+      if (earlyPromise) racers.push(earlyPromise);
+      await Promise.race(racers);
       clearTimeout(deadline);
     } else {
       await all;
     }
+    clearTimeout(earlyCheckTimer);
     responded = true;
     for (const provider of this.providers) {
       if (!providers[provider.id]) providers[provider.id] = { status: "partial", count: 0, ms: Date.now() - started, at: Date.now(), pending: true };
@@ -155,16 +173,21 @@ export class MultiProvider {
   // (its downloads are rationed), OpenSubtitles.org the rest.
   async findTimingReferences(context, options = {}) {
     const limit = Math.max(1, Number(options.limit) || 3);
-    const primary = this.byId.get("opensubtitles");
-    const secondary = this.byId.get("opensubtitles-org");
+    const primary = !this.#isCircuitOpen("opensubtitles") ? this.byId.get("opensubtitles") : null;
+    const secondary = !this.#isCircuitOpen("opensubtitles-org") ? this.byId.get("opensubtitles-org") : null;
+    const subdl = !this.#isCircuitOpen("subdl") ? this.byId.get("subdl") : null;
     const [first, more] = await Promise.all([
-      typeof primary?.findTimingReference === "function" ? primary.findTimingReference(context, options).catch(() => null) : null,
+      typeof primary?.findTimingReference === "function" ? primary.findTimingReference(context, options).catch((err) => { this.#recordFailure("opensubtitles", err); return null; }) : null,
       typeof secondary?.findTimingReferences === "function"
-        ? secondary.findTimingReferences(context, { ...options, limit }).catch(() => [])
-        : typeof secondary?.findTimingReference === "function" ? secondary.findTimingReference(context, options).then((one) => one ? [one] : []).catch(() => []) : []
+        ? secondary.findTimingReferences(context, { ...options, limit }).catch((err) => { this.#recordFailure("opensubtitles-org", err); return []; })
+        : typeof secondary?.findTimingReference === "function" ? secondary.findTimingReference(context, options).then((one) => one ? [one] : []).catch((err) => { this.#recordFailure("opensubtitles-org", err); return []; }) : []
     ]);
+    let extraRefs = [];
+    if (subdl && typeof subdl.findTimingReferences === "function" && ((first ? 1 : 0) + more.length) < limit) {
+      extraRefs = await subdl.findTimingReferences(context, { ...options, limit: limit - ((first ? 1 : 0) + more.length) }).catch(() => []);
+    }
     const rank = (item) => item.timingReferenceKind === "exact-hash" ? 2 : 1;
-    const all = [...(first ? [first] : []), ...more].sort((a, b) => rank(b) - rank(a));
+    const all = [...(first ? [first] : []), ...more, ...extraRefs].sort((a, b) => rank(b) - rank(a));
     const seen = new Set();
     return all.filter((item) => {
       const name = String(item.fileName || item.release || item.fileId).toLowerCase();

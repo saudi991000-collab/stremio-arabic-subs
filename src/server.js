@@ -8,7 +8,7 @@ import { readConfig } from "./config.js";
 import { logger } from "./logger.js";
 import { manifest } from "./manifest.js";
 import { parseExtra, parseReleaseName } from "./media.js";
-import { alignMediaLocally, alignMediaToFilename, identityUnresolved, resolveVideoId } from "./id-resolver.js";
+import { alignMediaLocally, alignMediaToFilename, identityUnresolved, resolveVideoId, useMetadataStore } from "./id-resolver.js";
 import { arabicFansubTeam, madeForThisVideo, rankCandidates, releaseFit, releaseMatched, resultLabel, stableKey } from "./ranker.js";
 export { madeForThisVideo, releaseFit };
 import { signSubtitleToken, verifySubtitleToken } from "./token.js";
@@ -120,22 +120,22 @@ function extensionOf(candidate) {
 }
 
 export const PROVIDER_LABELS = {
-  opensubtitles: "OpenSubtitles",
-  "opensubtitles-org": "OpenSubtitles.org",
-  moviesubtitles: "MovieSubtitles",
+  opensubtitles: "OpenSub",
+  "opensubtitles-org": "OS.org",
+  moviesubtitles: "MovieSub",
   subdl: "SubDL",
   subsource: "SubSource",
   arabicsubs: "ArabicSubs",
   wyzie: "Wyzie",
-  thesubtitledb: "TheSubtitleDB",
+  thesubtitledb: "SubDB",
   subf2m: "Subf2m",
   mora: "Mora",
   subkong: "SubKong",
   miraianime: "MiraiAnime",
   anikoto: "AniKoto",
   yifysubtitles: "YIFY",
-  tvsubtitles: "TVsubtitles",
-  "stremio-v3": "OpenSubtitles v3"
+  tvsubtitles: "TVSub",
+  "stremio-v3": "OS v3"
 };
 
 // Relative trust used only as a late tie-breaker in ordering.
@@ -229,8 +229,9 @@ export function detailedResultLabel(candidate, index) {
     ? (String(candidate.fileName || candidate.release || "").match(new RegExp(`(?:^|[-\\[ .])(${parsed.group})(?=$|[\\]. ])`, "i"))?.[1] || parsed.group)
     : "";
   const video = [platform || SOURCE_LABELS[parsed.source], parsed.resolution, groupName].filter(Boolean).join(" ");
+  const synced = (timingCheck(candidate) === "verified" && !candidate.reasons?.includes("exact-hash")) || Boolean(candidate.timingCorrected);
   const details = [who, video].filter(Boolean).join(" • ");
-  return `${index + 1}${marks ? ` ${marks}` : ""} ${details}${styled ? " 🎨" : ""}`;
+  return `${index + 1}${marks ? ` ${marks}` : ""} ${details}${synced ? " [SYNC]" : ""}${styled ? " 🎨" : ""}`;
 }
 
 // URL-safe version of the label for the subtitle link's final path segment.
@@ -267,13 +268,13 @@ export function sortForDisplay(candidates) {
       Number(b.candidate.chosen === 2) - Number(a.candidate.chosen === 2) ||
       // ⚠️ timing goes below the rest.
       Number(timingCheck(a.candidate) === "conflict") - Number(timingCheck(b.candidate) === "conflict") ||
-      // Exact file/release match first, then the team picked last in this
-      // series for translator consistency, then closest release attributes.
+      // Exact file/release match first, then verified/corrected timing so
+      // confirmed-synced subtitles lead, then the series-chosen team, then release attributes.
       Number(releaseFit(b.candidate) >= 300) - Number(releaseFit(a.candidate) >= 300) ||
+      Number(timingCheck(b.candidate) === "verified" || Boolean(b.candidate.timingCorrected)) - Number(timingCheck(a.candidate) === "verified" || Boolean(a.candidate.timingCorrected)) ||
       Number(b.candidate.chosen === 1) - Number(a.candidate.chosen === 1) ||
       releaseFit(b.candidate) - releaseFit(a.candidate) ||
       b.badges.count - a.badges.count ||
-      Number(timingCheck(b.candidate) === "verified") - Number(timingCheck(a.candidate) === "verified") ||
       Number(b.badges.matched) - Number(a.badges.matched) ||
       Number(b.badges.arabicTeam) - Number(a.badges.arabicTeam) ||
       Number(b.badges.styled) - Number(a.badges.styled) ||
@@ -317,12 +318,17 @@ function selectDiverseCandidates(candidates, limit) {
 // with a long untranslated stretch.
 export function dropDuplicatesAndOutliers(candidates, videoDurationSeconds) {
   const durations = candidates.filter((item) => item.deepAnalyzed && item.subtitleDurationSeconds > 0).map((item) => item.subtitleDurationSeconds).sort((a, b) => a - b);
+  const cueCounts = candidates.filter((item) => item.deepAnalyzed && item.cueCount > 0).map((item) => item.cueCount).sort((a, b) => a - b);
   const reference = Number(videoDurationSeconds) > 60 ? Number(videoDurationSeconds) : durations.length >= 4 ? durations[Math.floor(durations.length / 2)] : 0;
+  const medianCues = cueCounts.length >= 4 ? cueCounts[Math.floor(cueCounts.length / 2)] : 0;
   const kept = [];
   for (const candidate of candidates) {
     if (reference && candidate.deepAnalyzed && candidate.subtitleDurationSeconds > 0 && !candidate.reasons?.includes("exact-hash")) {
       const ratio = candidate.subtitleDurationSeconds / reference;
       if (ratio < 0.75 || ratio > 1.5) continue;
+    }
+    if (medianCues >= 40 && candidate.deepAnalyzed && candidate.cueCount > 0 && !candidate.reasons?.includes("exact-hash")) {
+      if (candidate.cueCount < medianCues * 0.45) continue;
     }
     // Part of the dialogue was never translated (long gap, or far shorter
     // than the video): not listed.
@@ -513,6 +519,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   // translator/team preferred per series, and which series are being watched.
   const choiceStore = stores?.choices || new JsonStore({ directory: config.cacheDirectory, namespace: "choices", ttlSeconds: 180 * 24 * 3600, remote });
   useAnimeNameStore(stores?.anime || new JsonStore({ directory: config.cacheDirectory, namespace: "anime", ttlSeconds: 30 * 24 * 3600, remote }));
+  useMetadataStore(stores?.meta || new JsonStore({ directory: config.cacheDirectory, namespace: "meta", ttlSeconds: 7 * 24 * 3600, remote }));
   const timingMemory = new TimingMemory(timingStore);
   const companion = new CompanionRegistry();
   const mediaAnalyzer = new LocalMediaAnalyzer({
@@ -606,7 +613,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     };
     let snapshot;
     if (typeof actualProvider.searchSnapshot === "function") {
-      snapshot = await actualProvider.searchSnapshot(context, config.maxSearchPages, timeoutMs, { onLate });
+      snapshot = await actualProvider.searchSnapshot(context, config.maxSearchPages, timeoutMs, { onLate, earlyMinCandidates: 10, earlyAfterMs: 2500 });
     } else {
       // Custom providers (tests, scripts) implement the plain array API.
       const found = await actualProvider.search(context, config.maxSearchPages, timeoutMs);
@@ -652,6 +659,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         loadReference: false,
         syncWithReference: false,
         concurrency: 2,
+        skipProviders: new Set(["opensubtitles"]),
         shouldPause: () => activeListings > 0,
         maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
       });
@@ -691,7 +699,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     const name = String(item.fileName || item.release || "");
     const bracket = name.match(/^\s*\[([^\]]{2,30})\]/)?.[1];
     const group = bracket || parseReleaseName(name).group;
-    return group ? `${item.provider || "opensubtitles"}:group:${String(group).toLowerCase()}` : "";
+    return group ? `group:${String(group).toLowerCase()}` : "";
   }
   function mediaKeyId(media) {
     return media?.imdbId ? `tt${String(media.imdbId).replace(/^tt/, "")}` : String(media?.sourceId || "");
@@ -722,6 +730,46 @@ export async function createAddonServer({ config = readConfig(), provider, cache
       // Prepared answers are rebuilt with the new order.
       stateEpoch += 1;
     }));
+    preSyncNextEpisode(payload?.context);
+  }
+
+  const preSynced = new Set();
+  function preSyncNextEpisode(ctx) {
+    const media = ctx?.media;
+    const extra = ctx?.extra || {};
+    if (!media || media.type !== "series" || !media.imdbId || !Number.isInteger(Number(media.episode))) return;
+    if (!extra.filename && !extra.videoHash) return;
+    const nextEp = Number(media.episode) + 1;
+    const nextId = `tt${String(media.imdbId).replace(/^tt/, "")}:${media.season || 1}:${nextEp}`;
+    if (preSynced.has(nextId)) return;
+    preSynced.add(nextId);
+    if (preSynced.size > 1000) preSynced.delete(preSynced.keys().next().value);
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      track(runInBackground(async () => {
+        const nextMedia = await alignMediaToFilename(await resolveVideoId("series", nextId), {});
+        if (identityUnresolved(nextMedia)) return;
+        const nextKey = searchKey("series", nextId, {});
+        const entry = await searchStore.get(nextKey) || await runSearch(nextKey, { media: nextMedia, extra: { filename: "", videoHash: "" } }, config.providerHardTimeoutMs);
+        if (!entry?.candidates?.length || typeof actualProvider.download !== "function") return;
+        const nextContext = { media: nextMedia, extra: { filename: extra.filename || "", videoHash: "" } };
+        const ranked = rankCandidates(entry.candidates, nextContext, config).slice(0, 6);
+        const analyzed = await deepAnalyzeCandidates(ranked, nextContext, actualProvider, actualCache, {
+          limit: Math.min(4, ranked.length),
+          maxDownloads: 3,
+          timeoutMs: 12000,
+          verdicts: verdictStore,
+          preferences,
+          skipProviders: new Set(["opensubtitles"]),
+          loadReference: true,
+          shouldPause: () => activeListings > 0,
+          maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
+        });
+        rememberTimings(nextContext, analyzed);
+      }));
+    }, 4000);
+    timer.unref?.();
+    retryTimers.add(timer);
   }
   async function loadChoices(media) {
     const episodeKey = episodeChoiceKey(media);
@@ -929,7 +977,8 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     const selected = sortForDisplay(diverse);
     const subtitles = selected.map((candidate, index) => {
       const extension = extensionOf(candidate);
-      const fallback = fallbackCandidates(eligible, candidate, extension, config.downloadFallbacks);
+      const fallbackLimit = index === 0 ? Math.max(config.downloadFallbacks, 8) : config.downloadFallbacks;
+      const fallback = fallbackCandidates(eligible, candidate, extension, fallbackLimit);
       const items = fallback.map((item) => ({
         provider: item.provider || "opensubtitles",
         ref: item.downloadRef ?? item.fileId,

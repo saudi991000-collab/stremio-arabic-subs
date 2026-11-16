@@ -89,7 +89,7 @@ async function loadNormalized(candidate, context, provider, cache, { requireArab
     extension: normalized.extension,
     analysis: normalized.analysis,
     cues,
-    timeline: parseTimeline(text),
+    timeline: parseTimeline(text, { dialogueOnly: true }),
     styling: inspectStyling(text, normalized.extension)
   };
 }
@@ -360,8 +360,10 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
     references = await within(loadReferences(context, provider, cache, { signal: controller.signal, limit: options.referenceLimit || 3 }), referenceBudget).catch(() => []);
   }
   const reference = references[0] || null;
-  // Arabic files matched to this exact video by hash are references too.
+  // Arabic files matched to this exact video by hash (or exact release when no
+  // English reference is available) can align other Arabic translations.
   const arabicReferences = [];
+  const arabicReleaseReferences = [];
   const bases = new Array(selected.length);
   const inspections = new Array(selected.length);
   const preferences = options.preferences || {};
@@ -394,10 +396,15 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
       }
       try {
         let inspected = null;
+        if (!remembered && options.skipProviders?.has(candidate.provider)) {
+          results[index] = { ...candidate, deepAnalyzed: false, validationPending: true };
+          continue;
+        }
         const needsDownload = !remembered || (reference && options.syncWithReference !== false);
         // Downloading and parsing is CPU-heavy; inside a listing only a few
         // new files are inspected. Already-verified files cost nothing.
-        if (needsDownload && Number.isFinite(options.maxDownloads)) {
+        const cachedBuffer = needsDownload && cache?.getFile ? await cache.getFile(subtitleCacheKey(candidate, context)).catch(() => null) : null;
+        if (needsDownload && !cachedBuffer && Number.isFinite(options.maxDownloads)) {
           if (downloadsStarted >= options.maxDownloads) {
             // An already-verified file stays verified; it is only not re-timed.
             results[index] = remembered
@@ -436,6 +443,8 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
           inspections[index] = inspected;
           if (candidate.reasons?.includes("exact-hash") && inspected.timeline.length >= 20) {
             arabicReferences.push({ timeline: inspected.timeline, kind: "exact-hash", source: "arabic-exact-hash" });
+          } else if (!references.length && (candidate.reasons?.includes("exact-release") || releaseFit(candidate) >= 180) && inspected.timeline.length >= 20) {
+            arabicReleaseReferences.push({ timeline: inspected.timeline, kind: "release", source: "arabic-release-match", ownerIndex: index });
           }
           analyzed = applyTiming(analyzed, inspected, references);
         }
@@ -464,10 +473,13 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
   });
   await Promise.all(workers);
   clearTimeout(stopTimer);
-  if (arabicReferences.length) {
+  const extraArabicRefs = arabicReferences.length ? arabicReferences : (!references.length ? arabicReleaseReferences.slice(0, 2) : []);
+  if (extraArabicRefs.length) {
     for (let index = 0; index < selected.length; index += 1) {
       if (!bases[index] || !results[index] || selected[index].reasons?.includes("exact-hash")) continue;
-      results[index] = finalize(applyTiming(bases[index], inspections[index], [...references, ...arabicReferences]));
+      const refsForIndex = extraArabicRefs.filter((refItem) => refItem.ownerIndex !== index);
+      if (!refsForIndex.length) continue;
+      results[index] = finalize(applyTiming(bases[index], inspections[index], [...references, ...refsForIndex]));
     }
   }
   controller.abort();

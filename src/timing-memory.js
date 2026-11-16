@@ -74,6 +74,14 @@ export class TimingMemory {
     return episode && video ? `timing:v1:${episode}|${video}` : "";
   }
 
+  #filenameKey(context) {
+    const episode = episodeKey(context?.media);
+    const extra = context?.extra || {};
+    if (!episode || !extra.videoHash || !extra.filename) return "";
+    const video = videoKey({ filename: extra.filename });
+    return video ? `timing:v1:${episode}|${video}` : "";
+  }
+
   // Serialises read-modify-write per key (two devices may save at once).
   #update(key, change) {
     const previous = this.locks.get(key) || Promise.resolve();
@@ -103,20 +111,31 @@ export class TimingMemory {
     const key = this.#key(context);
     if (!key || !transform) return null;
     const entry = { transform: plain(transform), kind: transform.reference || "release", score: Number(transform.score) || 0, at: Date.now() };
-    return this.#update(key, (record) => {
+    const updater = (record) => {
       const id = itemId(item);
       const existing = record.items[id] || {};
       if (strength(existing.auto) > strength(entry)) return null;
       record.items[id] = { ...existing, auto: entry, at: Date.now() };
       return record;
-    });
+    };
+    const fbKey = this.#filenameKey(context);
+    if (fbKey && fbKey !== key) this.#update(fbKey, updater).catch(() => null);
+    return this.#update(key, updater);
   }
 
   async lookup(context, item) {
     const key = this.#key(context);
     if (!key) return {};
-    const record = await this.store.get(key).catch(() => undefined);
-    const saved = record?.items?.[itemId(item)];
+    const id = itemId(item);
+    let record = await this.store.get(key).catch(() => undefined);
+    let saved = record?.items?.[id];
+    if (!saved) {
+      const fbKey = this.#filenameKey(context);
+      if (fbKey && fbKey !== key) {
+        record = await this.store.get(fbKey).catch(() => undefined);
+        saved = record?.items?.[id];
+      }
+    }
     if (!saved) return {};
     return {
       auto: saved.auto?.transform ? { ...saved.auto.transform, score: saved.auto.score, reference: saved.auto.kind } : undefined,

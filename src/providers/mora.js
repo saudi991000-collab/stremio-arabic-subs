@@ -45,7 +45,12 @@ export class MoraProvider {
         const payload = response.json();
         this.index = (Array.isArray(payload?.files) ? payload.files : [])
           .filter((file) => safeName(file.name))
-          .map((file) => ({ name: file.name, size: file.size }));
+          .map((file) => ({
+            name: file.name,
+            size: file.size,
+            parsed: parseReleaseName(file.name),
+            tokens: new Set(titleTokens(file.name))
+          }));
         this.indexExpiresAt = Date.now() + 6 * 60 * 60 * 1000;
         return this.index;
       })().finally(() => {
@@ -70,10 +75,10 @@ export class MoraProvider {
     const wantedTokens = new Set(titleTokens(wantedTitle));
     const files = await this.files(signal);
     return files.map((file) => {
-      const parsed = parseReleaseName(file.name);
+      const parsed = file.parsed || parseReleaseName(file.name);
+      const candidateTokens = file.tokens || new Set(titleTokens(file.name));
       const similarity = titleSimilarity(wantedTitle, file.name);
       if (similarity < 0.55) return null;
-      const candidateTokens = new Set(titleTokens(file.name));
       const sharedWanted = [...wantedTokens].filter((token) => candidateTokens.has(token)).length;
       if (wantedTokens.size >= 3 && sharedWanted / wantedTokens.size < 0.6) return null;
       if (wantedYear && parsed.year && Math.abs(wantedYear - parsed.year) > 1) return null;

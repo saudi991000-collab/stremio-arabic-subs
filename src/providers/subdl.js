@@ -149,4 +149,53 @@ export class SubDLProvider {
     });
     return { buffer: response.buffer, fileName: "subtitle.zip" };
   }
+
+  async findTimingReferences(context, { signal, limit = 2 } = {}) {
+    if (!this.config?.apiKey || (!context.media.imdbId && !context.extra.filename)) return [];
+    const params = new URLSearchParams({
+      api_key: this.config.apiKey,
+      type: context.media.type === "series" ? "tv" : "movie",
+      languages: "EN",
+      subs_per_page: "15",
+      releases: "1",
+      unpack: "1",
+      client: "stremio"
+    });
+    if (context.media.imdbId) params.set("imdb_id", `tt${context.media.imdbId}`);
+    else if (context.extra.filename) params.set("file_name", context.extra.filename);
+    if (context.media.type === "series") {
+      params.set("season_number", String(context.media.season));
+      params.set("episode_number", String(context.media.episode));
+    }
+    const response = await safeFetch(`${this.config.baseUrl}/subtitles?${params}`, {
+      allowedHosts: API_HOSTS,
+      headers: { Accept: "application/json" },
+      signal,
+      timeoutMs: 6000,
+      limiter,
+      label: "SubDL timing reference",
+      maxBytes: 2 * 1024 * 1024
+    }).catch(() => null);
+    if (!response) return [];
+    const payload = response.json();
+    const out = [];
+    for (const subtitle of payload?.subtitles || []) {
+      const files = subtitle.unpack_files?.length ? subtitle.unpack_files : [subtitle];
+      for (const file of files) {
+        const ref = file.url || subtitle.url;
+        if (!ref || !allowedDownloadUrl(ref)) continue;
+        out.push({
+          provider: "subdl",
+          fileId: file.file_n_id || subtitle.n_id || ref,
+          downloadRef: ref,
+          fileName: file.name || subtitle.name || "reference.srt",
+          release: file.release_name || subtitle.release_name || "",
+          language: "en",
+          timingReferenceKind: "release"
+        });
+        if (out.length >= limit) return out;
+      }
+    }
+    return out;
+  }
 }

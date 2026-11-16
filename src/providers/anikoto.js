@@ -125,7 +125,10 @@ export class AniKotoProvider {
     const base = new URL(this.config.baseUrl);
     const hosts = [base.hostname];
     const catalog = await this.json(`${this.config.baseUrl}/episodes/anikoto/${anilistId}?map=true`, { signal, hosts, timeoutMs: 7000 });
-    const row = (catalog?.episodes?.sub || []).find((item) => Number(item.number) === episode);
+    const absEp = Number(context.media.absoluteEpisode);
+    const subList = catalog?.episodes?.sub || [];
+    const row = subList.find((item) => Number(item.number) === episode)
+      || (Number.isInteger(absEp) && absEp > 0 ? subList.find((item) => Number(item.number) === absEp) : null);
     if (!row?.id || !/^\/?watch\/[a-z0-9/_-]+$/i.test(String(row.id))) return [];
     const payload = await this.json(`${this.config.baseUrl}/${String(row.id).replace(/^\//, "")}`, { signal, hosts, timeoutMs: 9000 });
     const seen = new Set();

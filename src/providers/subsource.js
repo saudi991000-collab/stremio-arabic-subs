@@ -54,8 +54,10 @@ export class SubSourceProvider {
     const movieQuery = new URLSearchParams({ searchType: "imdb", imdb: `tt${context.media.imdbId}` });
     const moviePayload = await this.json(`/movies/search?${movieQuery}`, signal);
     const movies = asArray(moviePayload);
+    const seasonNum = Number(context.media.season);
+    const seasonRe = Number.isInteger(seasonNum) ? new RegExp(`(?:season|s)\\s*0*${seasonNum}\\b`, "i") : null;
     const movie = (context.media.type === "series"
-      ? movies.find((item) => Number(item?.season) === Number(context.media.season))
+      ? movies.find((item) => Number(item?.season) === seasonNum) || (seasonRe ? movies.find((item) => seasonRe.test(String(item?.title || item?.name || ""))) : null)
       : null) || movies[0] || moviePayload?.data;
     const movieId = movieIdOf(movie);
     if (!movieId) return [];

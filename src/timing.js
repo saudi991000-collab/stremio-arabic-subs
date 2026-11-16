@@ -2,23 +2,43 @@ function seconds(hours, minutes, secondsValue, fraction, fractionDigits = 3) {
   return Number(hours || 0) * 3600 + Number(minutes) * 60 + Number(secondsValue) + Number(fraction) / (10 ** fractionDigits);
 }
 
-export function parseTimeline(text) {
-  const cues = [];
-  const arrow = /(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})/g;
-  for (const match of String(text).matchAll(arrow)) {
-    cues.push({
-      start: seconds(match[1], match[2], match[3], match[4]),
-      end: seconds(match[5], match[6], match[7], match[8])
-    });
+const NON_DIALOGUE_TEXT = /(?:https?:\/\/|www\.|t\.me\/|تابعونا|زوروا موقع|ترجمة\s*[:：]|مترجم\s*[:：]|\b(?:subscene|subdl|subsource|opensubtitles)\b)/i;
+const NON_DIALOGUE_ASS = /\\(?:pos|move|org|(?:k[fo]?|K)\d+|p[1-9]\b|an[1-9]\b)/;
+
+export function parseTimeline(text, { dialogueOnly = false } = {}) {
+  const all = [];
+  const filtered = [];
+  const source = String(text);
+  const arrowBlock = /(?:^|\n\s*\n)([^\n]*?\n)?\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})[^\n]*\n([\s\S]*?)(?=\n\s*\n|$)/g;
+  for (const match of source.replace(/\r/g, "").matchAll(arrowBlock)) {
+    const cue = {
+      start: seconds(match[2], match[3], match[4], match[5]),
+      end: seconds(match[6], match[7], match[8], match[9])
+    };
+    all.push(cue);
+    if (dialogueOnly && !NON_DIALOGUE_TEXT.test(match[10] || "")) filtered.push(cue);
   }
-  const ass = /^Dialogue:\s*[^,]*,\s*(\d+):(\d{2}):(\d{2})[.](\d{1,2}),\s*(\d+):(\d{2}):(\d{2})[.](\d{1,2}),/gim;
-  for (const match of String(text).matchAll(ass)) {
-    cues.push({
+  if (!all.length) {
+    const arrow = /(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})/g;
+    for (const match of source.matchAll(arrow)) {
+      all.push({
+        start: seconds(match[1], match[2], match[3], match[4]),
+        end: seconds(match[5], match[6], match[7], match[8])
+      });
+    }
+  }
+  const ass = /^Dialogue:\s*[^,]*,\s*(\d+):(\d{2}):(\d{2})[.](\d{1,2}),\s*(\d+):(\d{2}):(\d{2})[.](\d{1,2}),([^\n]*)$/gim;
+  for (const match of source.matchAll(ass)) {
+    const cue = {
       start: seconds(match[1], match[2], match[3], match[4], 2),
       end: seconds(match[5], match[6], match[7], match[8], 2)
-    });
+    };
+    all.push(cue);
+    const body = match[9] || "";
+    if (dialogueOnly && !NON_DIALOGUE_ASS.test(body) && !NON_DIALOGUE_TEXT.test(body)) filtered.push(cue);
   }
-  return cues.sort((a, b) => a.start - b.start);
+  const chosen = dialogueOnly && filtered.length >= 15 ? filtered : all;
+  return chosen.sort((a, b) => a.start - b.start);
 }
 
 function quantile(values, ratio) {
@@ -406,9 +426,14 @@ export function alignTimelines(referenceCues, candidateCues, options = {}) {
   const evidence = Math.min(1, inliers.length / (sparse ? 4 : 5));
   const scalePlausible = STANDARD_SCALES.includes(line.scale) ? 1 : 0.85;
   const kindWeight = options.kind === "vad" ? 0.8 : options.kind === "audio-whisper" ? 0.92 : 1;
+  const tailCutoff = reference[0].start + referenceSpan * 0.75;
+  const tailPoints = points.filter((point) => point.y >= tailCutoff);
+  const endDrifted = model === "linear" && points.length >= 5 && tailPoints.length > 0 &&
+    tailPoints.every((point) => Math.abs(point.y - mapTime(point.x, transform)) > 0.9);
+  const endGuard = endDrifted ? 0.78 : 1;
   const confidence = Math.max(0, Math.min(1,
     meanScore * 0.35 + (1 - outlierRatio) * 0.25 + evidence * 0.2 + coverage * 0.2
-  ) * Math.exp(-medianError / 0.6) * scalePlausible * kindWeight * (model === "piecewise" ? 0.92 : 1));
+  ) * Math.exp(-medianError / 0.6) * scalePlausible * kindWeight * endGuard * (model === "piecewise" ? 0.92 : 1));
   return {
     model,
     scale: segments ? undefined : line.scale,

@@ -4,6 +4,11 @@ const KITSU_META_BASE = "https://anime-kitsu.strem.fun";
 const cache = new Map();
 const metadataCache = new Map();
 const titleSearchCache = new Map();
+let persistentMetaStore = null;
+
+export function useMetadataStore(store) {
+  persistentMetaStore = store;
+}
 
 function asImdbId(value) {
   const match = String(value || "").match(/^tt(\d+)$/i);
@@ -182,6 +187,13 @@ async function cinemeta(imdbId, type, fetchImpl) {
   const key = `${type}:${imdbId}`;
   const cached = metadataCache.get(key);
   if (cached && Date.now() - cached.at < 24 * 60 * 60 * 1000) return cached.value;
+  if (persistentMetaStore) {
+    const stored = await persistentMetaStore.get(`cinemeta:${key}`).catch(() => undefined);
+    if (stored !== undefined) {
+      metadataCache.set(key, { at: Date.now(), value: stored });
+      return stored;
+    }
+  }
   const response = await fetchImpl(`https://v3-cinemeta.strem.io/meta/${type}/tt${imdbId}.json`, {
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(3000)
@@ -189,6 +201,7 @@ async function cinemeta(imdbId, type, fetchImpl) {
   if (!response.ok) throw new Error(`Cinemeta metadata failed with HTTP ${response.status}`);
   const value = (await response.json())?.meta || null;
   metadataCache.set(key, { at: Date.now(), value });
+  if (value && persistentMetaStore) persistentMetaStore.set(`cinemeta:${key}`, value).catch(() => null);
   return value;
 }
 
