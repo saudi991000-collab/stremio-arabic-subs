@@ -59,6 +59,31 @@ export function isCredit(text) {
 
 // Adds a right-to-left mark at the start of an Arabic line (after any leading
 // ASS override block or HTML-like tag, which are not displayed).
+// Splits an overly long single-line cue into two balanced lines for TV screens.
+export function wrapLongLines(lines, maxChars = 48) {
+  if (!Array.isArray(lines)) return lines;
+  const nonEmpty = lines.filter((line) => String(line).trim() !== "");
+  if (nonEmpty.length !== 1) return lines;
+  const raw = String(nonEmpty[0] || "");
+  if (/<[^>]+>|\{[^}]*\}/.test(raw)) return lines;
+  const visible = raw.replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "").trim();
+  if (visible.length <= maxChars) return lines;
+  const mid = Math.floor(raw.length / 2);
+  let best = -1;
+  let bestDist = Infinity;
+  for (let i = 1; i < raw.length - 1; i += 1) {
+    if (raw[i] === " ") {
+      const dist = Math.abs(i - mid);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    }
+  }
+  if (best < 12 || raw.length - best - 1 < 12) return lines;
+  return [raw.slice(0, best).trimEnd(), raw.slice(best + 1).trimStart()];
+}
+
 export function markLine(line) {
   const value = String(line);
   if (!ARABIC.test(value)) return value;
@@ -145,7 +170,8 @@ function polishTimed(text, extension, options) {
     }
   }
   const out = kept.map((cue, index) => {
-    const body = options.rtl ? cue.body.map(markLine) : cue.body;
+    const wrapped = options.wrap !== false ? wrapLongLines(cue.body) : cue.body;
+    const body = options.rtl ? wrapped.map(markLine) : wrapped;
     const timing = `${clock(cue.start, separator)} --> ${clock(cue.end, separator)}${cue.settings || ""}`;
     const id = vtt ? (cue.id ? `${cue.id}\n` : "") : `${index + 1}\n`;
     return `${id}${timing}\n${body.join("\n")}`;

@@ -7,11 +7,36 @@ function failureStatus(error) {
 }
 
 export class MultiProvider {
-  constructor(providers, { providerTimeoutMs = 8000 } = {}) {
+  constructor(providers, { providerTimeoutMs = 8000, circuitThreshold = 2, circuitCooldownMs = 30 * 60 * 1000 } = {}) {
     this.providers = providers;
     this.byId = new Map(providers.map((provider) => [provider.id, provider]));
     this.names = providers.map((provider) => provider.id);
     this.providerTimeoutMs = providerTimeoutMs;
+    this.circuitThreshold = circuitThreshold;
+    this.circuitCooldownMs = circuitCooldownMs;
+    this.circuits = new Map();
+  }
+
+  #isCircuitOpen(providerId) {
+    const entry = this.circuits.get(providerId);
+    if (!entry) return false;
+    if (entry.until && Date.now() < entry.until) return true;
+    if (entry.until && Date.now() >= entry.until) this.circuits.delete(providerId);
+    return false;
+  }
+
+  #recordSuccess(providerId) {
+    this.circuits.delete(providerId);
+  }
+
+  #recordFailure(providerId, error) {
+    const message = String(error?.message || error || "");
+    const hardBlock = error?.status === 403 || error?.status === 500 || /HTTP (?:403|500)/.test(message);
+    const current = this.circuits.get(providerId) || { failures: 0, until: 0 };
+    const failures = current.failures + 1;
+    const threshold = hardBlock ? this.circuitThreshold : Math.max(this.circuitThreshold + 1, 3);
+    const until = failures >= threshold ? Date.now() + this.circuitCooldownMs : 0;
+    this.circuits.set(providerId, { failures, until, reason: message.slice(0, 80) });
   }
 
   /**
@@ -41,6 +66,11 @@ export class MultiProvider {
     };
 
     const runs = this.providers.map(async (provider) => {
+      if (this.#isCircuitOpen(provider.id)) {
+        const reason = this.circuits.get(provider.id)?.reason || "circuit open";
+        providers[provider.id] = { status: "skipped", count: 0, ms: 0, at: Date.now(), reason: `circuit:${reason}` };
+        return;
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(new DOMException("provider timeout", "TimeoutError")), providerTimeoutMs);
       timer.unref?.();
@@ -49,9 +79,11 @@ export class MultiProvider {
       let found = [];
       try {
         const value = await provider.search(context, maxPages, { signal: controller.signal });
+        this.#recordSuccess(provider.id);
         found = (Array.isArray(value) ? value : []).map((candidate) => deepFreeze({ ...candidate, provider: candidate.provider || provider.id }));
         status = { status: found.length ? "ok" : "empty", count: found.length, ms: Date.now() - providerStarted, at: Date.now() };
       } catch (error) {
+        this.#recordFailure(provider.id, error);
         status = { status: controller.signal.aborted ? "timeout" : failureStatus(error), count: 0, ms: Date.now() - providerStarted, at: Date.now(), reason: String(error?.message || error).slice(0, 160) };
         logger.warn("subtitle provider search failed", { provider: provider.id, status: status.status, reason: status.reason });
       } finally {
@@ -95,7 +127,7 @@ export class MultiProvider {
         flushLate();
       });
     }
-    const complete = Object.values(providers).every((status) => status.status === "ok" || status.status === "empty");
+    const complete = Object.values(providers).every((status) => status.status === "ok" || status.status === "empty" || status.status === "skipped");
     return deepFreeze({ candidates: [...candidates], providers: { ...providers }, complete });
   }
 

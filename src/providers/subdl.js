@@ -72,12 +72,32 @@ export class SubDLProvider {
     };
     const searches = [];
     if (context.media.imdbId) searches.push(new URLSearchParams({ ...common, imdb_id: `tt${context.media.imdbId}` }));
-    if (context.extra.filename) searches.push(new URLSearchParams({ ...common, file_name: context.extra.filename }));
+    if (context.extra.filename) {
+      searches.push(new URLSearchParams({ ...common, file_name: context.extra.filename }));
+      if (/\[[^\]]+\]/.test(context.extra.filename)) {
+        const cleaned = String(context.extra.filename)
+          .replace(/\[[^\]]*\]/g, " ")
+          .replace(/\.[a-z0-9]{2,4}$/i, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (cleaned && cleaned !== context.extra.filename) {
+          searches.push(new URLSearchParams({ ...common, file_name: cleaned }));
+        }
+      }
+    }
     if (!searches.length) return [];
     if (context.media.type === "series") {
       for (const params of searches) {
         params.set("season_number", String(context.media.season));
         params.set("episode_number", String(context.media.episode));
+      }
+      if (context.media.imdbId && Number.isInteger(context.media.absoluteEpisode) && context.media.absoluteEpisode !== context.media.episode) {
+        searches.push(new URLSearchParams({
+          ...common,
+          imdb_id: `tt${context.media.imdbId}`,
+          season_number: "1",
+          episode_number: String(context.media.absoluteEpisode)
+        }));
       }
     }
     const settled = await Promise.allSettled(searches.map(async (params) => {

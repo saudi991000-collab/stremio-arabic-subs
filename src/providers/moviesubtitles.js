@@ -67,6 +67,7 @@ async function page(path, signal, label) {
     limiter,
     label,
     maxBytes: 3 * 1024 * 1024,
+    retries: 0,
     okStatuses: [404]
   });
   return response.status === 404 ? "" : response.text();

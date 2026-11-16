@@ -49,6 +49,12 @@ export class UpstashKv {
     return value == null ? undefined : JSON.parse(value);
   }
 
+  async getMany(keys) {
+    if (!keys.length) return [];
+    const values = await this.command(["MGET", ...keys.map((key) => `${this.prefix}${key}`)]);
+    return (Array.isArray(values) ? values : []).map((value) => (value == null ? undefined : JSON.parse(value)));
+  }
+
   async set(key, value, ttlSeconds) {
     await this.command(["SET", `${this.prefix}${key}`, JSON.stringify(value), "EX", String(Math.max(60, Math.round(ttlSeconds)))]);
   }
@@ -105,6 +111,52 @@ export class JsonStore {
     record = deepFreeze(record);
     this.#remember(key, record);
     return record.value;
+  }
+
+  async getMany(keys) {
+    const now = Date.now();
+    const out = new Map();
+    const missing = [];
+    for (const key of keys) {
+      let record = this.memory.get(key);
+      if (!record && this.directory) {
+        await this.ready;
+        try {
+          record = JSON.parse(await readFile(this.#filePath(key), "utf8"));
+        } catch {
+          record = undefined;
+        }
+      }
+      if (record) {
+        if (record.key === key && record.expiresAt >= now) {
+          record = deepFreeze(record);
+          this.#remember(key, record);
+          out.set(key, record.value);
+        } else {
+          this.memory.delete(key);
+        }
+      } else {
+        missing.push(key);
+      }
+    }
+    if (missing.length && this.remote) {
+      try {
+        const remoteRecords = typeof this.remote.getMany === "function"
+          ? await this.remote.getMany(missing.map((key) => `${this.namespace}:${hashKey(key)}`))
+          : await Promise.all(missing.map((key) => this.remote.get(`${this.namespace}:${hashKey(key)}`).catch(() => undefined)));
+        missing.forEach((key, index) => {
+          let record = remoteRecords?.[index];
+          if (record && record.key === key && record.expiresAt >= now) {
+            record = deepFreeze(record);
+            this.#remember(key, record);
+            out.set(key, record.value);
+          }
+        });
+      } catch (error) {
+        logger.warn("remote batch cache read failed", { namespace: this.namespace, reason: error.message });
+      }
+    }
+    return out;
   }
 
   async set(key, value, ttlSeconds = this.ttlMs / 1000) {
@@ -185,7 +237,7 @@ export function mergeSearchEntries(previous, snapshot, expectedProviders = []) {
   const complete = expected.every((id) => {
     const status = providers[id]?.status;
     const lastFailure = providers[id]?.lastFailure;
-    return (status === "ok" || status === "empty") && !lastFailure;
+    return (status === "ok" || status === "empty" || status === "skipped") && !lastFailure;
   });
   return deepFreeze({
     candidates,

@@ -267,11 +267,11 @@ export function sortForDisplay(candidates) {
       Number(b.candidate.chosen === 2) - Number(a.candidate.chosen === 2) ||
       // ⚠️ timing goes below the rest.
       Number(timingCheck(a.candidate) === "conflict") - Number(timingCheck(b.candidate) === "conflict") ||
-      // Closest to the video's own release first (hash, release name, fps,
-      // platform, source, group).
-      releaseFit(b.candidate) - releaseFit(a.candidate) ||
-      // Then the team picked last in this series, then quality.
+      // Exact file/release match first, then the team picked last in this
+      // series for translator consistency, then closest release attributes.
+      Number(releaseFit(b.candidate) >= 300) - Number(releaseFit(a.candidate) >= 300) ||
       Number(b.candidate.chosen === 1) - Number(a.candidate.chosen === 1) ||
+      releaseFit(b.candidate) - releaseFit(a.candidate) ||
       b.badges.count - a.badges.count ||
       Number(timingCheck(b.candidate) === "verified") - Number(timingCheck(a.candidate) === "verified") ||
       Number(b.badges.matched) - Number(a.badges.matched) ||
@@ -1182,7 +1182,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
           ...(server.warmState ? { warmUp: server.warmState } : {})
         });
       }
-      if (url.pathname === "/manifest.json") return json(response, 200, srtOnly ? srtManifest : manifest);
+      if (url.pathname === "/manifest.json") {
+        warmer.wake();
+        return json(response, 200, srtOnly ? srtManifest : manifest);
+      }
       if (url.pathname === "/" || url.pathname === "/configure") {
         const template = await readFile(path.join(moduleDirectory, "../public/configure.html"), "utf8").catch(() => embeddedConfigurePage);
         const manifestUrl = `${baseUrl(request, config)}/manifest.json`;
@@ -1405,7 +1408,18 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     let checkedSinceWork = 0;
     let sleepUntil = 0;
     const state = { warmed: 0, checked: 0, series: 0, episodes: 0, last: null };
-    warmer.wake = () => { sleepUntil = 0; checkedSinceWork = 0; };
+    let running = false;
+    const runTick = () => {
+      if (running) return;
+      running = true;
+      tick().catch((error) => logger.warn("warm-up failed", { reason: error?.message || String(error) })).finally(() => { running = false; });
+    };
+    warmer.wake = () => {
+      const wasSleeping = sleepUntil > Date.now();
+      sleepUntil = 0;
+      checkedSinceWork = 0;
+      if (wasSleeping && !running && activeListings === 0) setImmediate(runTick);
+    };
     async function episodesOf(id) {
       const known = episodeLists.get(id);
       if (known && Date.now() - known.at < 12 * 3600000) return known.list;
@@ -1476,12 +1490,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         return;
       }
     }
-    let running = false;
-    const timer = setInterval(() => {
-      if (running) return;
-      running = true;
-      tick().catch((error) => logger.warn("warm-up failed", { reason: error?.message || String(error) })).finally(() => { running = false; });
-    }, intervalMs);
+    const timer = setInterval(runTick, intervalMs);
     timer.unref?.();
     server.on("close", () => clearInterval(timer));
     server.warmState = state;

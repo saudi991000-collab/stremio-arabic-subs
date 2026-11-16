@@ -365,6 +365,9 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
   const bases = new Array(selected.length);
   const inspections = new Array(selected.length);
   const preferences = options.preferences || {};
+  const prefetchedVerdicts = verdicts && typeof verdicts.getMany === "function"
+    ? await within(verdicts.getMany(selected.map((candidate) => verdictKey(candidate, context))), Math.min(1200, Math.max(300, deadline - Date.now()))).catch(() => null)
+    : null;
   const results = new Array(selected.length);
   let cursor = 0;
   let downloadsStarted = 0;
@@ -383,7 +386,8 @@ export async function deepAnalyzeCandidates(candidates, context, provider, cache
         results[index] = { ...candidate, deepAnalyzed: false, validationPending: true };
         continue;
       }
-      const remembered = verdicts ? await verdicts.get(verdictKey(candidate, context)).catch(() => undefined) : undefined;
+      const vKey = verdictKey(candidate, context);
+      const remembered = prefetchedVerdicts ? prefetchedVerdicts.get(vKey) : verdicts ? await verdicts.get(vKey).catch(() => undefined) : undefined;
       if (remembered && !remembered.ok && !retryableRejection(remembered)) {
         results[index] = null;
         continue;
