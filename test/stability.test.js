@@ -150,7 +150,7 @@ test("short labels: ✅ only for the same release, team, source, 🎨 for styled
   const labels = result.subtitles.map((item) => item.label);
   assert.equal(labels.length, 3, "the season pack is not listed");
   // Same name as the video first, then the Arabic team, styled first.
-  assert.match(labels[0], /^1 ✅ mix • WEB 1080p$/);
+  assert.match(labels[0], /^1 \[الأفضل • مطابق\] mix • WEB 1080p$/);
   assert.match(labels[1], /^2 3ASQ • WEB 1080p 🎨$/);
   assert.match(labels[2], /^3 3ASQ • WEB 1080p$/);
   for (const label of labels) assert.doesNotMatch(label, /%|\|/);
@@ -167,7 +167,7 @@ test("the subtitle closest to the video's release is listed first, then quality"
   const result = await withServer(provider, {}, async (base) =>
     (await fetch(`${base}/subtitles/series/tt1234567:1:7/filename=Show.S01E07.1080p.WEB-DL.DDP5.1.H.264-NTb.mkv.json`)).json());
   const labels = result.subtitles.map((item) => item.label);
-  assert.match(labels[0], /^1 ✅ mix • WEB 1080p NTb$/, labels.join(" / "));
+  assert.match(labels[0], /^1 \[الأفضل • مطابق\] mix • WEB 1080p NTb$/, labels.join(" / "));
   assert.match(labels[1], /3ASQ/, "a known Arabic team comes next");
 });
 
@@ -347,11 +347,11 @@ test("the subtitle picked before is listed first with 📌, and its team leads t
     assert.equal((await fetch(picked.url)).status, 200);
     await server.flushBackground();
     const again = await listing(url);
-    assert.match(again.subtitles[0].label, /📌/);
+    assert.match(again.subtitles[0].label, /مفضلة/);
     assert.ok(again.subtitles[0].label.includes(pickedTeam));
     const next = await (await fetch(`${url}/subtitles/series/tt1234567:1:8/filename=Show.S01E08.1080p.WEB-DL.mkv.json`)).json();
     assert.ok(next.subtitles[0].label.includes(pickedTeam), next.subtitles.map((item) => item.label).join("\n"));
-    assert.doesNotMatch(next.subtitles[0].label, /📌/);
+    assert.doesNotMatch(next.subtitles[0].label, /مفضلة/);
   });
 });
 
@@ -390,4 +390,14 @@ test("of identical files, the copy named like the video is the one listed", asyn
   const labels = result.subtitles.map((item) => item.label);
   assert.equal(labels.length, 1, labels.join(" / "));
   assert.match(labels[0], /NTb/);
+});
+
+test("warm-up does not search an unfinished episode again within the hour", async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({ meta: { videos: [{ season: 1, episode: 1, released: "2020-01-01T00:00:00.000Z" }] } }), { status: 200 });
+  await withServer(fakeProvider("a", 1), {}, async (_base, server) => {
+    await server.stores.search.set("search:v8:series:tt1234567:1:1:::", { candidates: [], providers: {}, complete: false, updatedAt: Date.now(), media: { type: "series", imdbId: "1234567", season: 1, episode: 1 } });
+    const state = server.startWarmer({ series: ["tt1234567"], perSeries: 5, intervalMs: 30, idleMs: 60000, fetchImpl });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(state.warmed, 0);
+  });
 });

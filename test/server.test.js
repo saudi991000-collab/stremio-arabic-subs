@@ -42,7 +42,7 @@ test("returns the exact hash result first in top-ten mode", async () => {
     const response = await fetch(`${base}/subtitles/movie/tt1234567/videoHash=abc&filename=Movie.2025.BluRay.mkv.json`);
     const value = await response.json();
     assert.equal(value.subtitles.length, 2);
-    assert.match(value.subtitles[0].label, /^1 ✅🎯 Custom • BD$/);
+    assert.match(value.subtitles[0].label, /^1 \[الأفضل • مطابق\] Custom • BD$/);
     assert.equal(value.subtitles[0].lang, "ara");
   });
 });
@@ -59,7 +59,7 @@ test("labels styled ASS subtitles and serves them without stripping styles", asy
   };
   await withServer(provider, async (base) => {
     const listing = await (await fetch(`${base}/subtitles/series/tt1234567:1:7/filename=Anime.S01E07.mkv.json`)).json();
-    assert.match(listing.subtitles[0].label, /^1 (?:✅ )?Custom 🎨$/);
+    assert.match(listing.subtitles[0].label, /^1 \[الأفضل(?: • مطابق)?\] Custom 🎨$/);
     assert.match(listing.subtitles[0].url, /\.ass$/);
     const response = await fetch(listing.subtitles[0].url);
     assert.match(response.headers.get("content-type"), /text\/x-ssa/);
@@ -81,7 +81,7 @@ test("returns at most twenty-five labeled subtitle choices", async () => {
   await withServer(provider, async (base) => {
     const listing = await (await fetch(`${base}/subtitles/series/tt1234567:1:7/filename=Show.S01E07.mkv.json`)).json();
     assert.equal(listing.subtitles.length, 25);
-    assert.match(listing.subtitles[0].label, /^1 (?:✅ )?Custom/);
+    assert.match(listing.subtitles[0].label, /^1 \[الأفضل(?: • مطابق)?\] Custom/);
     assert.match(listing.subtitles[1].label, /^2 (?:✅ )?Custom/);
   });
 });

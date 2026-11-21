@@ -209,15 +209,21 @@ const SOURCE_LABELS = {
 export function detailedResultLabel(candidate, index) {
   const parsed = parseReleaseName(candidate.fileName || candidate.release || "");
   const { team, styled } = badgesFor(candidate);
+  const exactMatch = madeForThisVideo(candidate) || Boolean(candidate.reasons?.includes("exact-hash"));
+  const timingStatus = timingCheck(candidate);
+  const synced = (timingStatus === "verified" && !candidate.reasons?.includes("exact-hash")) || Boolean(candidate.timingCorrected);
   const marks = [
-    candidate.chosen === 2 ? "📌" : "",
     candidate.userRating > 0 ? "⭐" : "",
-    madeForThisVideo(candidate) ? "✅" : "",
-    timingCheck(candidate) === "verified" ? "🎯" : "",
     candidate.timingCorrected ? "⏱" : "",
-    timingCheck(candidate) === "conflict" ? "⚠️" : "",
     candidate.userRating < 0 ? "👎" : ""
   ].filter(Boolean).join("");
+  const statusTags = [
+    index === 0 ? "الأفضل" : "",
+    candidate.chosen === 2 ? "مفضلة" : "",
+    exactMatch ? "مطابق" : "",
+    synced ? "SYNC" : "",
+    timingStatus === "conflict" ? "توقيت غير مؤكد" : ""
+  ].filter(Boolean).join(" • ");
   // MiraiAnime hosts many teams' files: show the team named in the zip.
   const shownTeam = (candidate.provider === "miraianime" && /^\[([^\]]{2,30})\]/.exec(candidate.fileName || "")?.[1]) || team;
   const who = shownTeam || PROVIDER_LABELS[candidate.provider] || candidate.provider || "Custom";
@@ -229,9 +235,8 @@ export function detailedResultLabel(candidate, index) {
     ? (String(candidate.fileName || candidate.release || "").match(new RegExp(`(?:^|[-\\[ .])(${parsed.group})(?=$|[\\]. ])`, "i"))?.[1] || parsed.group)
     : "";
   const video = [platform || SOURCE_LABELS[parsed.source], parsed.resolution, groupName].filter(Boolean).join(" ");
-  const synced = (timingCheck(candidate) === "verified" && !candidate.reasons?.includes("exact-hash")) || Boolean(candidate.timingCorrected);
   const details = [who, video].filter(Boolean).join(" • ");
-  return `${index + 1}${marks ? ` ${marks}` : ""} ${details}${synced ? " [SYNC]" : ""}${styled ? " 🎨" : ""}`;
+  return `${index + 1}${marks ? ` ${marks}` : ""}${statusTags ? ` [${statusTags}]` : ""} ${details}${styled ? " 🎨" : ""}`;
 }
 
 // URL-safe version of the label for the subtitle link's final path segment.
@@ -651,18 +656,20 @@ export async function createAddonServer({ config = readConfig(), provider, cache
     const work = track(runInBackground(async () => {
       const ranked = rankCandidates(entry.candidates, context, config)
         .filter((candidate) => isSeasonPack(candidate) ? seasonPackForEpisode(candidate, context.media) : candidate.confidence >= Math.max(45, config.minConfidence - 25));
-      await deepAnalyzeCandidates(ranked, context, actualProvider, actualCache, {
+      const hasVideo = Boolean(context.extra?.videoHash || context.extra?.filename);
+      const analyzed = await deepAnalyzeCandidates(ranked, context, actualProvider, actualCache, {
         limit: Math.min(36, ranked.length),
         timeoutMs: config.backgroundValidationTimeoutMs,
         verdicts: verdictStore,
         preferences,
-        loadReference: false,
-        syncWithReference: false,
+        loadReference: hasVideo,
+        syncWithReference: hasVideo,
         concurrency: 2,
         skipProviders: new Set(["opensubtitles"]),
         shouldPause: () => activeListings > 0,
         maxSeriesSubtitleSeconds: config.maxSeriesSubtitleSeconds
       });
+      if (hasVideo) rememberTimings(context, analyzed);
     }).finally(() => validations.delete(key)));
     validations.set(key, work);
     return work;
@@ -753,10 +760,10 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         const entry = await searchStore.get(nextKey) || await runSearch(nextKey, { media: nextMedia, extra: { filename: "", videoHash: "" } }, config.providerHardTimeoutMs);
         if (!entry?.candidates?.length || typeof actualProvider.download !== "function") return;
         const nextContext = { media: nextMedia, extra: { filename: extra.filename || "", videoHash: "" } };
-        const ranked = rankCandidates(entry.candidates, nextContext, config).slice(0, 6);
+        const ranked = rankCandidates(entry.candidates, nextContext, config).slice(0, 10);
         const analyzed = await deepAnalyzeCandidates(ranked, nextContext, actualProvider, actualCache, {
-          limit: Math.min(4, ranked.length),
-          maxDownloads: 3,
+          limit: Math.min(10, ranked.length),
+          maxDownloads: 6,
           timeoutMs: 12000,
           verdicts: verdictStore,
           preferences,
@@ -1450,7 +1457,7 @@ export async function createAddonServer({ config = readConfig(), provider, cache
   // only while no listing is being answered and no other background search
   // runs. A full pass with nothing to do sleeps until something new is
   // watched (or an hour), so the shared store is not polled all day.
-  server.startWarmer = ({ series = config.warmSeries, perSeries = config.warmEpisodes, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 3600000, recentRefreshMs = 3 * 3600000 } = {}) => {
+  server.startWarmer = ({ series = config.warmSeries, perSeries = config.warmEpisodes, intervalMs = config.warmIntervalSeconds * 1000, refreshMs = config.warmRefreshDays * 86400000, fetchImpl = fetch, idleMs = 3600000, recentRefreshMs = 3 * 3600000, incompleteRetryMs = 3600000 } = {}) => {
     const episodeLists = new Map();
     const recent = new Set();
     let cursor = 0;
@@ -1516,7 +1523,12 @@ export async function createAddonServer({ config = readConfig(), provider, cache
         state.checked += 1;
         const key = searchKey("series", videoId, {});
         const entry = await searchStore.get(key);
-        const fresh = entry && entry.complete && !identityUnresolved(entry.media) && Date.now() - (entry.updatedAt || 0) < (recent.has(videoId) ? Math.min(refreshMs, recentRefreshMs) : refreshMs);
+        const age = Date.now() - (entry?.updatedAt || 0);
+        // A search that did not finish (a source timed out) is tried again
+        // after an hour, not on every pass: shows with no Arabic subtitles
+        // (WWE Raw) were searched thousands of times a week.
+        const fresh = entry && !identityUnresolved(entry.media) &&
+          (entry.complete ? age < (recent.has(videoId) ? Math.min(refreshMs, recentRefreshMs) : refreshMs) : age < incompleteRetryMs);
         if (fresh) {
           checkedSinceWork += 1;
           if (checkedSinceWork >= episodes.length) {

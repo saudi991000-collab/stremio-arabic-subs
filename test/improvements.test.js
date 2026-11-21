@@ -140,7 +140,7 @@ test("verified/corrected synced subtitles rank before unverified release matches
     { provider: "wyzie", fileId: 2, reasons: ["timing-consensus"], timingScore: 0.85, timingReferenceKind: "consensus", deepAnalyzed: true }
   ]);
   assert.deepEqual(sorted.map((item) => item.fileId), [2, 1]);
-  assert.match(detailedResultLabel(sorted[0], 0), /\[SYNC\]/);
+  assert.match(detailedResultLabel(sorted[0], 0), /SYNC/);
 });
 
 test("TimingMemory shares saved timings between videoHash (PC) and filename (Mi Box/iPad)", async () => {
@@ -235,4 +235,11 @@ test("markLine anchors trailing weak punctuation (., !, ...) with RLM so it stay
   assert.equal(markLine("إن هذا أفضل بكثير."), "\u200Fإن هذا أفضل بكثير.\u200F");
   assert.equal(markLine("لبقية السناجب!"), "\u200Fلبقية السناجب!\u200F");
   assert.equal(markLine("<i>انتظر...</i>"), "<i>\u200Fانتظر...\u200F</i>");
+});
+
+test("detailedResultLabel puts clear Arabic best/match/sync tags at the front", () => {
+  const bestExact = detailedResultLabel({ provider: "subdl", fileName: "Show.S01E01.mkv", reasons: ["exact-hash"] }, 0);
+  assert.match(bestExact, /^1 \[الأفضل • مطابق\] SubDL/);
+  const secondSync = detailedResultLabel({ provider: "subsource", fileName: "Show.S01E01.BluRay.ass", timingScore: 0.9, timingReferenceKind: "embedded" }, 1);
+  assert.match(secondSync, /^2 \[SYNC\]/);
 });

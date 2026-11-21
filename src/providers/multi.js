@@ -7,7 +7,7 @@ function failureStatus(error) {
 }
 
 export class MultiProvider {
-  constructor(providers, { providerTimeoutMs = 8000, circuitThreshold = 2, circuitCooldownMs = 30 * 60 * 1000 } = {}) {
+  constructor(providers, { providerTimeoutMs = 8000, circuitThreshold = 3, circuitCooldownMs = 30 * 60 * 1000 } = {}) {
     this.providers = providers;
     this.byId = new Map(providers.map((provider) => [provider.id, provider]));
     this.names = providers.map((provider) => provider.id);
@@ -32,10 +32,13 @@ export class MultiProvider {
   #recordFailure(providerId, error) {
     const message = String(error?.message || error || "");
     const hardBlock = error?.status === 403 || error?.status === 500 || /HTTP (?:403|500)/.test(message);
+    // Only a site that keeps refusing (403/500 in a row) is paused. Timeouts
+    // are the free server being slow, not the site being down: pausing on
+    // them dropped working sources and stored their lists as complete.
+    if (!hardBlock) return;
     const current = this.circuits.get(providerId) || { failures: 0, until: 0 };
     const failures = current.failures + 1;
-    const threshold = hardBlock ? this.circuitThreshold : Math.max(this.circuitThreshold + 1, 3);
-    const until = failures >= threshold ? Date.now() + this.circuitCooldownMs : 0;
+    const until = failures >= this.circuitThreshold ? Date.now() + this.circuitCooldownMs : 0;
     this.circuits.set(providerId, { failures, until, reason: message.slice(0, 80) });
   }
 
@@ -110,7 +113,7 @@ export class MultiProvider {
       ? new Promise((resolve) => { earlyResolve = resolve; })
       : null;
     const maybeEarly = () => {
-      if (earlyResolve && !responded && candidates.length >= earlyMinCandidates && Date.now() - started >= earlyAfterMs) {
+      if (earlyResolve && !responded && candidates.length >= earlyMinCandidates && Date.now() - started >= earlyAfterMs - 10) {
         earlyResolve();
       }
     };
